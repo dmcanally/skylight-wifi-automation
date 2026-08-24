@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skylight-wifi-automation
+data:
+  config.yaml: |
+    timezone: America/Chicago
+    poll_seconds: 60
+    dry_run: true
+    include_late: true
+    include_routines: true
+    empty_day_unlocks: true
+    children:
+      - name: Lanie
+        skylight_profile: Lanie
+        cutoff: "21:00"
+        expected_device_count: 4
+        google_device_ids: []
+      - name: Libby
+        skylight_profile: Libby
+        cutoff: "21:00"
+        expected_device_count: 6
+        google_device_ids: []
+      - name: Tucker
+        skylight_profile: Tucker
+        cutoff: "20:00"
+        expected_device_count: 3
+        google_device_ids: []
+

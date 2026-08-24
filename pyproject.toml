@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skylight-wifi-automation"
+version = "0.1.0"
+description = "Unlock Google Wi-Fi devices when Skylight tasks are complete"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "googlewifi==0.0.21",
+  "pydantic>=2.8,<3",
+  "python-dateutil>=2.9,<3",
+  "pyskylight>=0.1.0",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<1", "ruff>=0.8,<1"]
+
+[project.scripts]
+skylight-wifi = "skylight_wifi_automation.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skylight_wifi_automation"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100

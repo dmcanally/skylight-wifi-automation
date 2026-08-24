@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skylight-wifi-automation
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: skylight-wifi-automation
+  template:
+    metadata:
+      labels:
+        app: skylight-wifi-automation
+    spec:
+      containers:
+        - name: automation
+          image: ghcr.io/dmcanally/skylight-wifi-automation:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: skylight-wifi-automation
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      volumes:
+        - name: config
+          configMap:
+            name: skylight-wifi-automation
+
