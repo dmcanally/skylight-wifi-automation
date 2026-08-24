@@ -21,9 +21,8 @@ def child(cutoff="21:00"):
     return ChildConfig(
         name="Lanie",
         skylight_profile="Lanie",
+        family_wifi_group="Lanie",
         cutoff=cutoff,
-        expected_device_count=4,
-        google_device_ids=[],
     )
 
 
@@ -70,4 +69,3 @@ def test_cutoff_always_pauses():
 def test_other_profiles_do_not_block_child():
     result = decide(child(), [task(profile="Libby")], at(18), app_config())
     assert result.should_unlock is True
-

@@ -35,11 +35,8 @@ class AutomationService:
                 decision.reason,
                 self.config.dry_run,
             )
-            if not child.google_device_ids:
-                LOGGER.warning("child=%s has no configured Google device IDs", child.name)
-                continue
-            await self.google.set_internet(
-                child.google_device_ids, decision.should_unlock, self.config.dry_run
+            await self.google.set_group_internet(
+                child.family_wifi_group, decision.should_unlock, self.config.dry_run
             )
 
     async def run_forever(self) -> None:
@@ -50,4 +47,3 @@ class AutomationService:
                 # Fail closed with respect to mutations: an API failure never changes Wi-Fi state.
                 LOGGER.exception("poll failed; leaving current Wi-Fi state unchanged")
             await asyncio.sleep(self.config.poll_seconds)
-

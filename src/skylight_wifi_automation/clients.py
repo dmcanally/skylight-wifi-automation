@@ -89,6 +89,7 @@ class GoogleWifiClient:
         self._client = GoogleWifi(refresh_token, session=self._session)
         self._system_id: str | None = None
         self._devices: dict[str, dict[str, Any]] = {}
+        self._family_groups: dict[str, list[str]] = {}
 
     async def close(self) -> None:
         await self._session.close()
@@ -99,11 +100,26 @@ class GoogleWifiClient:
             raise RuntimeError(f"Expected one Google Wi-Fi system, found {len(systems)}")
         self._system_id, system = next(iter(systems.items()))
         self._devices = system.get("devices", {})
+        family_settings = system.get("groupSettings", {}).get("familyHubSettings", {})
+        self._family_groups = extract_family_groups(family_settings)
         return self._devices
 
-    async def set_internet(self, device_ids: list[str], enabled: bool, dry_run: bool) -> None:
+    async def set_group_internet(self, group_name: str, enabled: bool, dry_run: bool) -> None:
         if self._system_id is None:
             await self.refresh()
+        matches = [
+            station_ids
+            for name, station_ids in self._family_groups.items()
+            if name.casefold() == group_name.casefold()
+        ]
+        if len(matches) != 1:
+            available = ", ".join(sorted(self._family_groups)) or "none discovered"
+            raise RuntimeError(
+                f"Expected one Family Wi-Fi group named {group_name!r}; available: {available}"
+            )
+        device_ids = matches[0]
+        if not device_ids:
+            raise RuntimeError(f"Family Wi-Fi group {group_name!r} has no members")
         missing = sorted(set(device_ids) - set(self._devices))
         if missing:
             raise RuntimeError(f"Unknown Google Wi-Fi device IDs: {', '.join(missing)}")
@@ -125,9 +141,52 @@ class GoogleWifiClient:
     def discovery_rows(self) -> list[dict[str, Any]]:
         return [
             {
-                "id": device_id,
-                "name": data.get("friendlyName") or data.get("name") or "Unknown",
-                "paused": bool(data.get("paused")),
+                "name": name,
+                "member_count": len(station_ids),
             }
-            for device_id, data in sorted(self._devices.items())
+            for name, station_ids in sorted(self._family_groups.items())
         ]
+
+
+def extract_family_groups(payload: Any) -> dict[str, list[str]]:
+    """Find named Family Wi-Fi groups while remaining tolerant of private API shape changes."""
+    found: dict[str, list[str]] = {}
+
+    def member_ids(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        output: list[str] = []
+        for member in value:
+            if isinstance(member, str):
+                output.append(member)
+            elif isinstance(member, dict):
+                member_id = member.get("stationId") or member.get("deviceId") or member.get("id")
+                if member_id:
+                    output.append(str(member_id))
+        return output
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            name = next(
+                (
+                    value.get(key)
+                    for key in ("groupName", "displayName", "label", "name")
+                    if isinstance(value.get(key), str) and value.get(key)
+                ),
+                None,
+            )
+            members: list[str] = []
+            for key in ("stationIds", "deviceIds", "stations", "members"):
+                members = member_ids(value.get(key))
+                if members:
+                    break
+            if name and members:
+                found[str(name)] = list(dict.fromkeys(members))
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+    return found

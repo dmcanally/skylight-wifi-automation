@@ -11,18 +11,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class ChildConfig(BaseModel):
     name: str
     skylight_profile: str
+    family_wifi_group: str
     cutoff: time
-    expected_device_count: int = Field(gt=0)
-    google_device_ids: list[str]
-
-    @model_validator(mode="after")
-    def validate_device_count(self) -> ChildConfig:
-        if self.google_device_ids and len(self.google_device_ids) != self.expected_device_count:
-            raise ValueError(
-                f"{self.name}: configured {len(self.google_device_ids)} device IDs; "
-                f"expected {self.expected_device_count}"
-            )
-        return self
 
 
 class AppConfig(BaseModel):
@@ -44,8 +34,13 @@ class AppConfig(BaseModel):
     def unique_children(self) -> AppConfig:
         names = [child.name.casefold() for child in self.children]
         profiles = [child.skylight_profile.casefold() for child in self.children]
-        if len(names) != len(set(names)) or len(profiles) != len(set(profiles)):
-            raise ValueError("Child names and Skylight profiles must be unique")
+        groups = [child.family_wifi_group.casefold() for child in self.children]
+        if (
+            len(names) != len(set(names))
+            or len(profiles) != len(set(profiles))
+            or len(groups) != len(set(groups))
+        ):
+            raise ValueError("Child names, Skylight profiles, and Family Wi-Fi groups must be unique")
         return self
 
 

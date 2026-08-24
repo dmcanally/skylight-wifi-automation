@@ -8,17 +8,13 @@ empty_day_unlocks: true
 children:
   - name: Lanie
     skylight_profile: Lanie
+    family_wifi_group: Lanie
     cutoff: "21:00"
-    expected_device_count: 4
-    google_device_ids: []
   - name: Libby
     skylight_profile: Libby
+    family_wifi_group: Libby
     cutoff: "21:00"
-    expected_device_count: 6
-    google_device_ids: []
   - name: Tucker
     skylight_profile: Tucker
+    family_wifi_group: Tucker
     cutoff: "20:00"
-    expected_device_count: 3
-    google_device_ids: []
-
