@@ -53,6 +53,7 @@ and must never be edited with real values or committed.
 The deployment starts in dry-run mode. After group discovery and a successful Family Wi-Fi
 group test, change `dry_run` to `false` in the ConfigMap.
 
-The repository publishes a private image to GitHub Container Registry after pushes to `main`.
+The repository publishes private `latest`, immutable commit, and Flux-compatible semantic
+version image tags to GitHub Container Registry after pushes to `main`.
 Your cluster will need an image-pull secret authorized for the private package, unless you
 deliberately change the package visibility.
