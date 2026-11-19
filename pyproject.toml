@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skylight-wifi-automation"
-version = "0.1.0"
-description = "Unlock Google Wi-Fi devices when Skylight tasks are complete"
-requires-python = ">=3.11"
+version = "0.2.0"
+description = "Pause UniFi Object Manager blocks when Skylight tasks are complete"
+requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.10,<4",
-  "googlewifi==0.0.21",
+  "prometheus-client>=0.21,<1",
   "pydantic>=2.8,<3",
-  "python-dateutil>=2.9,<3",
   "pyskylight>=0.1.0",
   "PyYAML>=6.0,<7",
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +27,8 @@ packages = ["src/skylight_wifi_automation"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
+src = ["src", "tests"]

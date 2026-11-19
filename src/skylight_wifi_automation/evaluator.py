@@ -1,17 +1,30 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 
 from .config import AppConfig, ChildConfig
 from .models import ChildDecision, Task
 
 
-def decide(
-    child: ChildConfig, tasks: list[Task], now: datetime, config: AppConfig
-) -> ChildDecision:
-    if now.timetz().replace(tzinfo=None) >= child.cutoff:
-        return ChildDecision(child.name, False, "daily cutoff reached", 0, 0)
+def past_cutoff(cutoff: time, now: datetime) -> bool:
+    """True at or after the child's local cutoff.
 
+    ``now`` must already be in the household timezone. Wall-clock comparison
+    follows America/Chicago through CST and CDT.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return now.timetz().replace(tzinfo=None) >= cutoff
+
+
+def decide(
+    child: ChildConfig,
+    tasks: list[Task],
+    now: datetime,
+    config: AppConfig,
+    *,
+    already_unlocked: bool,
+) -> ChildDecision:
     relevant = [
         task
         for task in tasks
@@ -20,6 +33,13 @@ def decide(
         and (config.include_late or not task.late)
     ]
     completed = sum(task.complete or task.skipped for task in relevant)
+    required = len(relevant)
+    if past_cutoff(child.cutoff, now):
+        return ChildDecision(child.name, False, "daily cutoff reached", completed, required)
+    if child.manual_unblock:
+        return ChildDecision(child.name, True, "manual unblock", completed, required)
+    if already_unlocked:
+        return ChildDecision(child.name, True, "already unlocked today", completed, required)
     if not relevant:
         return ChildDecision(
             child.name,
@@ -28,11 +48,8 @@ def decide(
             0,
             0,
         )
-    if completed == len(relevant):
+    if completed == required:
         return ChildDecision(
-            child.name, True, "all required tasks complete", completed, len(relevant)
+            child.name, True, "all required tasks complete", completed, required
         )
-    return ChildDecision(
-        child.name, False, "required tasks remain", completed, len(relevant)
-    )
-
+    return ChildDecision(child.name, False, "required tasks remain", completed, required)
