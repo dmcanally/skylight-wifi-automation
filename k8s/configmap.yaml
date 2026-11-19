@@ -1,7 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: skylight-wifi-automation
+  name: wifi-automation-config
+  namespace: wifi-automation
 data:
   config.yaml: |
     timezone: America/Chicago
@@ -9,17 +10,26 @@ data:
     dry_run: true
     include_late: true
     include_routines: true
-    empty_day_unlocks: true
+    empty_day_unlocks: false
+    unifi_url: "https://unifi.local/proxy/network/integration/v1"
+    # unifi_site:
+    unifi_tls_ca: |
+      -----BEGIN CERTIFICATE-----
+      REPLACE_WITH_THE_PINNED_PUBLIC_CONSOLE_PEM
+      -----END CERTIFICATE-----
     children:
       - name: Lanie
         skylight_profile: Lanie
-        family_wifi_group: Lanie
-        cutoff: "21:00"
+        object_name: "No Internet - Lanie"
+        cutoff: "20:30"
+        # manual_unblock: false
       - name: Libby
         skylight_profile: Libby
-        family_wifi_group: Libby
-        cutoff: "21:00"
+        object_name: "No Internet - Libby"
+        cutoff: "20:30"
+        # manual_unblock: false
       - name: Tucker
         skylight_profile: Tucker
-        family_wifi_group: Tucker
+        object_name: "No Internet - Tucker"
         cutoff: "20:00"
+        # manual_unblock: false

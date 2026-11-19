@@ -20,3 +20,6 @@ class ChildDecision:
     complete: int
     required: int
 
+    @property
+    def should_lock(self) -> bool:
+        return not self.should_unlock

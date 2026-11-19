@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterable
 from datetime import date
 from typing import Any, Self
 
-import aiohttp
-from googlewifi import GoogleWifi
 from pyskylight import PasswordAuth, Skylight
 
 from .models import Task
@@ -42,7 +39,9 @@ class SkylightClient:
             raise RuntimeError(f"Expected one Skylight frame, found {len(frames)}")
         frame_id = frames[0].id
         categories = await self._client.get_categories(frame_id)
-        profile_by_id = {str(category.id): str(_value(category, "label", "")) for category in categories}
+        profile_by_id = {
+            str(category.id): str(_value(category, "label", "")) for category in categories
+        }
         groups = await self._client.get_all_chores(frame_id)
         today = day.isoformat()
         output: list[Task] = []
@@ -81,112 +80,3 @@ def _task_buckets(groups: Any) -> Iterable[tuple[str, list[Any]]]:
         for bucket, items in collection.items():
             if bucket == "late" or "today" in bucket:
                 yield ("routine:" if collection_name == "routines" else "") + bucket, items
-
-
-class GoogleWifiClient:
-    def __init__(self, refresh_token: str) -> None:
-        self._session = aiohttp.ClientSession()
-        self._client = GoogleWifi(refresh_token, session=self._session)
-        self._system_id: str | None = None
-        self._devices: dict[str, dict[str, Any]] = {}
-        self._family_groups: dict[str, list[str]] = {}
-
-    async def close(self) -> None:
-        await self._session.close()
-
-    async def refresh(self) -> dict[str, dict[str, Any]]:
-        systems = await self._client.get_systems()
-        if len(systems) != 1:
-            raise RuntimeError(f"Expected one Google Wi-Fi system, found {len(systems)}")
-        self._system_id, system = next(iter(systems.items()))
-        self._devices = system.get("devices", {})
-        family_settings = system.get("groupSettings", {}).get("familyHubSettings", {})
-        self._family_groups = extract_family_groups(family_settings)
-        return self._devices
-
-    async def set_group_internet(self, group_name: str, enabled: bool, dry_run: bool) -> None:
-        if self._system_id is None:
-            await self.refresh()
-        matches = [
-            station_ids
-            for name, station_ids in self._family_groups.items()
-            if name.casefold() == group_name.casefold()
-        ]
-        if len(matches) != 1:
-            available = ", ".join(sorted(self._family_groups)) or "none discovered"
-            raise RuntimeError(
-                f"Expected one Family Wi-Fi group named {group_name!r}; available: {available}"
-            )
-        device_ids = matches[0]
-        if not device_ids:
-            raise RuntimeError(f"Family Wi-Fi group {group_name!r} has no members")
-        missing = sorted(set(device_ids) - set(self._devices))
-        if missing:
-            raise RuntimeError(f"Unknown Google Wi-Fi device IDs: {', '.join(missing)}")
-        if dry_run:
-            return
-        assert self._system_id is not None
-        for device_id in device_ids:
-            current_paused = bool(self._devices[device_id].get("paused"))
-            desired_paused = not enabled
-            if current_paused == desired_paused:
-                continue
-            result = self._client.pause_device(self._system_id, device_id, desired_paused)
-            if inspect.isawaitable(result):
-                result = await result
-            if not result:
-                raise RuntimeError(f"Google Wi-Fi rejected state change for device {device_id}")
-            self._devices[device_id]["paused"] = desired_paused
-
-    def discovery_rows(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": name,
-                "member_count": len(station_ids),
-            }
-            for name, station_ids in sorted(self._family_groups.items())
-        ]
-
-
-def extract_family_groups(payload: Any) -> dict[str, list[str]]:
-    """Find named Family Wi-Fi groups while remaining tolerant of private API shape changes."""
-    found: dict[str, list[str]] = {}
-
-    def member_ids(value: Any) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        output: list[str] = []
-        for member in value:
-            if isinstance(member, str):
-                output.append(member)
-            elif isinstance(member, dict):
-                member_id = member.get("stationId") or member.get("deviceId") or member.get("id")
-                if member_id:
-                    output.append(str(member_id))
-        return output
-
-    def walk(value: Any) -> None:
-        if isinstance(value, dict):
-            name = next(
-                (
-                    value.get(key)
-                    for key in ("groupName", "displayName", "label", "name")
-                    if isinstance(value.get(key), str) and value.get(key)
-                ),
-                None,
-            )
-            members: list[str] = []
-            for key in ("stationIds", "deviceIds", "stations", "members"):
-                members = member_ids(value.get(key))
-                if members:
-                    break
-            if name and members:
-                found[str(name)] = list(dict.fromkeys(members))
-            for child in value.values():
-                walk(child)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
-    walk(payload)
-    return found

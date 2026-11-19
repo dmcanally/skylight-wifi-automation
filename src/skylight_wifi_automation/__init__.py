@@ -1,2 +1,3 @@
-"""Skylight chore to Google Wi-Fi automation."""
+"""Skylight chores to UniFi Object Manager automation."""
 
+__version__ = "0.2.0"
