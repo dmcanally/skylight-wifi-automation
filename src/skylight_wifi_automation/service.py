@@ -13,7 +13,7 @@ from .config import AppConfig, ChildConfig
 from .evaluator import decide
 from .metrics import Metrics
 from .models import ChildDecision, Task
-from .unifi import NetworkObject
+from .unifi import NetworkObject, UniFiError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,24 +68,29 @@ class AutomationService:
             LOGGER.error("skylight request failed; non-cutoff state will stay unchanged")
 
         try:
-            objects = await _objects_by_name(self.unifi)
-        except Exception:  # noqa: BLE001 - a UniFi failure must not change object state
-            LOGGER.error("unifi request failed; leaving object state unchanged")
+            listed = await _list_objects(self.unifi)
+        except Exception as exc:  # noqa: BLE001 - a UniFi failure must not change object state
+            LOGGER.error(
+                "unifi request failed; leaving object state unchanged detail=%s",
+                _safe_detail(exc),
+            )
             for child in self.config.children:
                 _log_line(child, None, self.config.dry_run, "unchanged", False, "unifi_unreachable")
             raise PollError("unifi request failed") from None
 
-        missing = [
-            child for child in self.config.children if child.object_name not in objects
-        ]
-        if missing:
-            LOGGER.error("unifi object list is missing a configured object")
-            for child in self.config.children:
-                _log_line(child, None, self.config.dry_run, "unchanged", False, "object_not_read")
-            raise PollError("unifi object list is incomplete")
-
+        allowed = frozenset(child.object_name for child in self.config.children)
+        name_error = False
         for child in self.config.children:
+            matches = [obj for obj in listed if obj.name == child.object_name]
             past = now.timetz().replace(tzinfo=None) >= child.cutoff
+            if len(matches) != 1:
+                name_error = True
+                LOGGER.error(
+                    "unifi object name match child=%s count=%s", child.name, len(matches)
+                )
+                reason = "object_name_not_found" if not matches else "object_name_not_unique"
+                _log_line(child, None, self.config.dry_run, "unchanged", False, reason)
+                continue
             if skylight_error and not past:
                 _log_line(
                     child, None, self.config.dry_run, "unchanged", False, "skylight_unreachable"
@@ -98,7 +103,7 @@ class AutomationService:
             if decision.should_unlock:
                 self.unlocked_on[child.name] = today
                 _save_latch(self._latch_path, self.unlocked_on)
-            obj = objects[child.object_name]
+            obj = matches[0]
             desired_enabled = not decision.should_unlock
             if obj.enabled == desired_enabled:
                 _log_line(child, decision, self.config.dry_run, "unchanged", False, decision.reason)
@@ -108,13 +113,20 @@ class AutomationService:
                 _log_line(child, decision, True, action, False, decision.reason)
                 continue
             try:
-                await _set_blocked(self.unifi, obj, desired_enabled)
-            except Exception:  # noqa: BLE001 - a failed write stops the rest of the poll
-                LOGGER.error("unifi write failed child=%s action=%s", child.name, action)
+                await _set_blocked(self.unifi, obj, desired_enabled, allowed)
+            except Exception as exc:  # noqa: BLE001 - a failed write stops the rest of the poll
+                LOGGER.error(
+                    "unifi write failed child=%s action=%s detail=%s",
+                    child.name,
+                    action,
+                    _safe_detail(exc),
+                )
                 _log_line(child, decision, False, action, False, "unifi_write_failed")
                 raise PollError("unifi write failed") from None
             _log_line(child, decision, False, action, True, decision.reason)
 
+        if name_error:
+            raise PollError("unifi object name did not match exactly one object")
         if skylight_error:
             raise PollError("skylight request failed")
 
@@ -136,18 +148,26 @@ async def _tasks_for(skylight: object, day: date) -> list[Task]:
     return await method(day)
 
 
-async def _objects_by_name(unifi: object) -> dict[str, NetworkObject]:
-    method: Callable[[], Awaitable[dict[str, NetworkObject]]] = (
-        unifi.objects_by_name  # type: ignore[attr-defined]
+async def _list_objects(unifi: object) -> list[NetworkObject]:
+    method: Callable[[], Awaitable[list[NetworkObject]]] = (
+        unifi.list_objects  # type: ignore[attr-defined]
     )
     return await method()
 
 
-async def _set_blocked(unifi: object, obj: NetworkObject, blocked: bool) -> None:
-    method: Callable[[NetworkObject, bool], Awaitable[None]] = (
+async def _set_blocked(
+    unifi: object, obj: NetworkObject, blocked: bool, allowed_names: frozenset[str]
+) -> None:
+    method: Callable[[NetworkObject, bool, frozenset[str]], Awaitable[None]] = (
         unifi.set_blocked  # type: ignore[attr-defined]
     )
-    await method(obj, blocked)
+    await method(obj, blocked, allowed_names)
+
+
+def _safe_detail(exc: BaseException) -> str:
+    if isinstance(exc, UniFiError):
+        return str(exc)
+    return type(exc).__name__
 
 
 def _load_latch(path: Path) -> dict[str, date]:

@@ -95,25 +95,43 @@ object-oriented network config. The same `X-API-KEY` is sent. The site path
 segment is the site `internalReference` from the Integration site list, not
 the site UUID.
 
+The v2 paths below are undocumented. A Network firmware update can change or
+remove them. `wifi_automation_poll_failures_total`
+(`WifiAutomationPollFailing`) and
+`wifi_automation_last_success_timestamp_seconds`
+(`WifiAutomationLastSuccessStale`, `WifiAutomationMetricsAbsent`) are how
+that shows up: the poll leaves object state unchanged and the alerts fire.
+
 * `GET /proxy/network/v2/api/site/{internalReference}/object-oriented-network-configs?offset=&limit=`
+* `GET /proxy/network/v2/api/site/{internalReference}/object-oriented-network-config/{id}`
 * `PUT /proxy/network/v2/api/site/{internalReference}/object-oriented-network-config/{id}`
 
-The PUT body is the object just read, with only `enabled` changed.
-`enabled: false` pauses it (internet on). `enabled: true` resumes it
-(blocked). The client pages until `totalCount` is consumed. It never sends
-`POST` or `DELETE`, and it never calls `/firewall/policies`.
+A write is allowed only when the object's `name` is an exact match for one
+configured `object_name`. Zero matches or more than one match skips that
+child, logs an error, and counts a poll failure. Other children are not
+written by that miss. Immediately before a PUT the process GETs that object
+again and changes only `enabled`. `enabled: false` pauses it (internet on).
+`enabled: true` resumes it (blocked). It then GETs the object once more. If
+`enabled` is not the value just written, that poll fails and the next poll
+is the retry. A non-2xx response, 401, 403, a non-boolean or missing
+`enabled`, an unexpected document shape, or a pagination error does the
+same: no further writes, and `wifi_automation_poll_failures_total` increments.
 
-This is the re-review the kubernetes SRE note asked for if the published
-Integration API cannot pause the object. Gate 4 below is the check that the
-local Integration API key is accepted on those two object paths.
+The client never sends `POST` or `DELETE`, and it never calls
+`/firewall/policies`. Info logs never include the object body. Debug logs
+include only the object id, name, and `enabled`.
 
 ## Gate 4 evidence
 
 Run this on Network 11.0.99 against one test object, not a child's. Use a
-throwaway client. Before saving any output, delete the `X-API-KEY` value,
-every MAC address, and every client IP address. Do not paste the PUT body.
+throwaway client. The local `X-API-KEY` has to be accepted on all three
+calls: `GET /proxy/network/integration/v1/sites`, the v2 list GET, and the
+v2 PUT. A 401 or 403 on any of them means the key is not accepted.
 
-1. Resolve the site with the Integration API and keep `internalReference`.
+Before saving any output, delete the `X-API-KEY` value, every MAC address,
+and every client IP address. Do not paste the PUT body.
+
+1. `GET /sites` proves the key on the Integration API. Keep `internalReference`.
 
 ```bash
 curl --fail-with-body --cacert ucg.pem \
@@ -122,8 +140,9 @@ curl --fail-with-body --cacert ucg.pem \
   "https://unifi.local/proxy/network/integration/v1/sites?offset=0&limit=25"
 ```
 
-2. List objects and note the test object's `id` and `enabled`. Follow
-   `offset` until `offset + count` reaches `totalCount`.
+2. `GET` the v2 object list. This proves the key on that GET. Note the test
+   object's `id` and `enabled`. Follow `offset` until `offset + count`
+   reaches `totalCount`.
 
 ```bash
 curl --fail-with-body --cacert ucg.pem \
@@ -132,10 +151,16 @@ curl --fail-with-body --cacert ucg.pem \
   "https://unifi.local/proxy/network/v2/api/site/${SITE_REF}/object-oriented-network-configs?offset=0&limit=200"
 ```
 
-3. Pause. Copy the object you just read, set `enabled` to `false`, and PUT
-   that document. Read the list again. `enabled` must be `false`.
+3. Pause. `GET` the one object, copy it, set only `enabled` to `false`, and
+   `PUT` it. This proves the key on the v2 PUT. `GET` the object again.
+   `enabled` must be `false`.
 
 ```bash
+curl --fail-with-body --cacert ucg.pem \
+  -H "X-API-KEY: ${UNIFI_API_KEY}" \
+  -H "Accept: application/json" \
+  "https://unifi.local/proxy/network/v2/api/site/${SITE_REF}/object-oriented-network-config/${OBJECT_ID}"
+
 curl --fail-with-body --cacert ucg.pem \
   -X PUT \
   -H "X-API-KEY: ${UNIFI_API_KEY}" \
@@ -143,10 +168,15 @@ curl --fail-with-body --cacert ucg.pem \
   -H "Content-Type: application/json" \
   --data-binary @pause.json \
   "https://unifi.local/proxy/network/v2/api/site/${SITE_REF}/object-oriented-network-config/${OBJECT_ID}"
+
+curl --fail-with-body --cacert ucg.pem \
+  -H "X-API-KEY: ${UNIFI_API_KEY}" \
+  -H "Accept: application/json" \
+  "https://unifi.local/proxy/network/v2/api/site/${SITE_REF}/object-oriented-network-config/${OBJECT_ID}"
 ```
 
-4. Resume. PUT the same document with `enabled` set to `true`. Read the list
-   again. `enabled` must be `true`.
+4. Resume. `PUT` the same document with only `enabled` set to `true`. `GET`
+   the object again. `enabled` must be `true`.
 
 Do not `PATCH` or `PUT` `/proxy/network/integration/v1/sites/{siteId}/firewall/policies/{id}`.
 
@@ -171,7 +201,7 @@ The process serves Prometheus text on `:8080/metrics`.
 
 | Metric | Meaning |
 | --- | --- |
-| `wifi_automation_poll_failures_total` | Polls that hit a Skylight error, a UniFi error, or a failed object write. Dry-run skips are not counted. |
+| `wifi_automation_poll_failures_total` | Polls that hit a Skylight error, a UniFi error (including 401/403, a non-2xx write, a bad `enabled` value, a pagination error, or a name that is missing or duplicated), or a verify-after-write mismatch. Dry-run skips are not counted. |
 | `wifi_automation_last_success_timestamp_seconds` | Unix time of the last poll that finished without error, including a dry-run poll. It is absent until that happens. |
 
 ## Local check

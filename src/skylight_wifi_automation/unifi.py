@@ -26,6 +26,14 @@ class UniFiError(RuntimeError):
     """Safe to log. It never includes the API key, a MAC, or a client IP."""
 
 
+class UniFiStatus(Exception):
+    """HTTP status from a test double or a caller that already read the code."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"status={status}")
+
+
 @dataclass
 class NetworkObject:
     id: str
@@ -72,30 +80,48 @@ class UnifiClient:
             await self._session.close()
             self._session = None
 
-    async def objects_by_name(self) -> dict[str, NetworkObject]:
+    async def list_objects(self) -> list[NetworkObject]:
         site = await self._resolve_site()
         reference = site.get("internalReference")
         if not isinstance(reference, str) or not reference:
             raise UniFiError("unifi site is missing internalReference")
         self._site_ref = reference
         payload = await self._collect(self._collection_url(reference))
-        found: dict[str, NetworkObject] = {}
-        for item in payload:
-            obj = _parse_object(item)
-            if obj.name in found:
-                raise UniFiError("duplicate object name")
-            found[obj.name] = obj
-        return found
+        return [_parse_object(item) for item in payload]
 
-    async def set_blocked(self, obj: NetworkObject, blocked: bool) -> None:
-        """Resume the object when ``blocked`` is true, pause it when false."""
+    async def set_blocked(
+        self, obj: NetworkObject, blocked: bool, allowed_names: frozenset[str]
+    ) -> None:
+        """Resume when ``blocked`` is true. Pause when it is false.
+
+        The name must be an exact configured ``object_name``. The object is
+        read again immediately before the PUT, only ``enabled`` is changed,
+        and a follow-up GET must show that value. A mismatch is not retried.
+        """
         if self._site_ref is None:
             raise UniFiError("unifi site is not resolved")
-        if obj.enabled == blocked:
+        if obj.name not in allowed_names:
+            raise UniFiError("refusing to write an object outside the configured names")
+        fresh = await self._read_object(obj.id)
+        if fresh.name != obj.name or fresh.name not in allowed_names:
+            raise UniFiError("refusing to write an object outside the configured names")
+        if fresh.enabled == blocked:
             return
-        body = dict(obj.raw)
+        body = dict(fresh.raw)
         body["enabled"] = blocked
-        await self._request("PUT", self._object_url(self._site_ref, obj.id), json_body=body)
+        _debug_object("unifi write", fresh.id, fresh.name, blocked)
+        await self._request("PUT", self._object_url(self._site_ref, fresh.id), json_body=body)
+        confirmed = await self._read_object(fresh.id)
+        if confirmed.enabled != blocked or confirmed.name != fresh.name:
+            raise UniFiError("unifi object state did not match after write")
+
+    async def _read_object(self, object_id: str) -> NetworkObject:
+        if self._site_ref is None:
+            raise UniFiError("unifi site is not resolved")
+        payload = await self._request("GET", self._object_url(self._site_ref, object_id))
+        obj = _parse_object(_unwrap_object(payload))
+        _debug_object("unifi read", obj.id, obj.name, obj.enabled)
+        return obj
 
     async def _resolve_site(self) -> dict[str, Any]:
         sites = await self._collect(f"{self._base_url}{SITES_PATH}")
@@ -136,8 +162,10 @@ class UnifiClient:
                 url,
                 params={"offset": offset, "limit": self.page_limit},
             )
-            page, total = _page(payload)
+            page, total = _page(payload, offset)
             if not page:
+                if total is not None and offset < total:
+                    raise UniFiError("unifi pagination ended early")
                 break
             fresh = 0
             for item in page:
@@ -148,12 +176,14 @@ class UnifiClient:
                 items.append(item)
                 fresh += 1
             if fresh == 0:
-                break
+                raise UniFiError("unifi pagination repeated a page")
             offset += len(page)
             if total is not None and offset >= total:
                 break
             if total is None and len(page) < self.page_limit:
                 break
+        else:
+            raise UniFiError("unifi pagination did not finish")
         return items
 
     async def _request(
@@ -167,7 +197,10 @@ class UnifiClient:
         if method not in {"GET", "PUT"}:
             raise UniFiError("unsupported unifi method")
         if self._requester is not None:
-            return await self._requester(method, url, params, json_body)
+            try:
+                return await self._requester(method, url, params, json_body)
+            except UniFiStatus as exc:
+                raise UniFiError(f"unifi {method} failed status={exc.status}") from None
         session = await self._ensure_session()
         headers = {
             "X-API-KEY": self._api_key,
@@ -184,7 +217,7 @@ class UnifiClient:
                 headers=headers,
                 allow_redirects=False,
             ) as response:
-                if response.status >= 400:
+                if response.status < 200 or response.status >= 300:
                     raise UniFiError(f"unifi {method} failed status={response.status}")
                 if response.status == 204:
                     return None
@@ -204,25 +237,59 @@ class UnifiClient:
         return self._session
 
 
-def _page(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
+def _page(payload: Any, requested_offset: int) -> tuple[list[dict[str, Any]], int | None]:
     if isinstance(payload, list):
-        data = payload
-        total = None
-    elif isinstance(payload, dict):
-        data = payload.get("data", [])
-        total = payload.get("totalCount")
-    else:
+        page: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise UniFiError("unifi page entry is not an object")
+            page.append(item)
+        return page, None
+    if not isinstance(payload, dict):
         raise UniFiError("unifi response is not a page")
+    if "data" not in payload:
+        raise UniFiError("unifi page is missing data")
+    data = payload["data"]
     if not isinstance(data, list):
         raise UniFiError("unifi page data is not a list")
-    page: list[dict[str, Any]] = []
+    parsed: list[dict[str, Any]] = []
     for item in data:
         if not isinstance(item, dict):
             raise UniFiError("unifi page entry is not an object")
-        page.append(item)
-    if total is None:
-        return page, None
-    return page, int(total)
+        parsed.append(item)
+    if "count" in payload and _require_int(payload["count"], "count") != len(parsed):
+        raise UniFiError("unifi pagination count mismatch")
+    if "offset" in payload and _require_int(payload["offset"], "offset") != requested_offset:
+        raise UniFiError("unifi pagination offset mismatch")
+    if "totalCount" not in payload:
+        return parsed, None
+    return parsed, _require_int(payload["totalCount"], "totalCount")
+
+
+def _require_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UniFiError(f"unifi pagination {label} is not an integer")
+    if value < 0:
+        raise UniFiError(f"unifi pagination {label} is negative")
+    return value
+
+
+def _unwrap_object(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise UniFiError("unifi object response has an unexpected shape")
+    data = payload.get("data", payload)
+    if isinstance(data, dict) and "enabled" in data:
+        return data
+    if "enabled" in payload and "data" not in payload:
+        return payload
+    raise UniFiError("unifi object response has an unexpected shape")
+
+
+def _debug_object(action: str, object_id: str, name: str, enabled: bool) -> None:
+    # Id, name, and enabled only. Never the body, a MAC, or an IP.
+    logging.getLogger(__name__).debug(
+        "%s id=%s name=%s enabled=%s", action, object_id, name, enabled
+    )
 
 
 def _parse_object(item: dict[str, Any]) -> NetworkObject:

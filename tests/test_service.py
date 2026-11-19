@@ -279,30 +279,208 @@ async def test_unifi_read_failure_writes_nothing_even_at_cutoff(tmp_path, caplog
     assert "wifi_automation_poll_failures_total 1.0" in generate_latest(metrics._registry).decode()
 
 
-async def test_startup_does_not_write_until_every_object_has_been_read(tmp_path):
-    api = UniFiAPI(
-        [network_object(enabled=True)],
-    )
+async def test_missing_name_skips_that_child_only(tmp_path):
+    api = UniFiAPI([network_object(enabled=True)])
     unifi = UnifiClient(
         API_KEY,
         "https://unifi.local/proxy/network/integration/v1",
         app_config().unifi_tls_ca,
         requester=api,
     )
+    metrics = Metrics(CollectorRegistry())
     service = AutomationService(
         app_config(children=[child("Lanie"), child("Libby")]),
         Skylight([_task(complete=True), _task(id="2", profile="Libby", complete=True)]),
         unifi,
-        Metrics(CollectorRegistry()),
+        metrics,
         clock=lambda: chicago(2026, 8, 24, 18),
         latch_path=tmp_path / "latch.json",
     )
     await service.poll()
-    assert api.writes() == []
+    assert [call["url"].rsplit("/", 1)[-1] for call in api.writes()] == ["obj-lanie"]
+    assert "wifi_automation_poll_failures_total 1.0" in generate_latest(metrics._registry).decode()
 
     api.fail = "sites"
     await service.poll()
+    assert len(api.writes()) == 1
+
+
+async def test_zero_or_duplicate_name_writes_nothing(tmp_path, caplog):
+    caplog.set_level("INFO")
+    zero, zero_api, zero_metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(name="no internet - lanie", object_id="obj-case")],
+        chicago(2026, 8, 24, 18),
+    )
+    await zero.poll()
+    assert zero_api.writes() == []
+    assert "object_name_not_found" in caplog.text
+    assert "wifi_automation_poll_failures_total 1.0" in generate_latest(
+        zero_metrics._registry
+    ).decode()
+
+    duplicate, duplicate_api, duplicate_metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [
+            network_object(object_id="obj-a"),
+            network_object(object_id="obj-b"),
+            network_object(name="No Internet - Other", object_id="obj-other"),
+        ],
+        chicago(2026, 8, 24, 18),
+    )
+    await duplicate.poll()
+    assert duplicate_api.writes() == []
+    assert "object_name_not_unique" in caplog.text
+    assert "wifi_automation_poll_failures_total 1.0" in generate_latest(
+        duplicate_metrics._registry
+    ).decode()
+
+
+async def test_read_before_write_uses_the_fresh_object(tmp_path):
+    service, api, _metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    api.fresh_stamp = 2
+    await service.poll()
+    singular = [call["method"] for call in api.calls if call["url"].endswith("/obj-lanie")]
+    assert singular == ["GET", "PUT", "GET"]
+    body = api.writes()[0]["body"]
+    assert body["enabled"] is False
+    assert body["stamp"] == 2
+    assert body["targets"] == [{"type": "MAC", "value": MAC}]
+    assert len(api.writes()) == 1
+
+
+async def test_verify_after_write_mismatch_is_not_retried(tmp_path):
+    service, api, metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    api.confirm_mismatch = True
+    await service.poll()
+    assert len(api.writes()) == 1
+    assert [call["method"] for call in api.calls if call["url"].endswith("/obj-lanie")] == [
+        "GET",
+        "PUT",
+        "GET",
+    ]
+    assert "wifi_automation_poll_failures_total 1.0" in generate_latest(metrics._registry).decode()
+    assert "wifi_automation_last_success_timestamp_seconds" not in generate_latest(
+        metrics._registry
+    ).decode()
+
+
+async def test_non_bool_enabled_writes_nothing(tmp_path):
+    for enabled in ("yes", 1, None):
+        obj = network_object(enabled=True)
+        if enabled is None:
+            del obj["enabled"]
+        else:
+            obj["enabled"] = enabled
+        service, api, metrics = _build(
+            tmp_path,
+            [_task(complete=True)],
+            [obj],
+            chicago(2026, 8, 24, 18),
+        )
+        await service.poll()
+        assert api.writes() == []
+        text = generate_latest(metrics._registry).decode()
+        assert "wifi_automation_poll_failures_total 1.0" in text
+        assert "wifi_automation_last_success_timestamp_seconds" not in text
+
+
+async def test_auth_and_put_errors_leave_state_unchanged(tmp_path, caplog):
+    caplog.set_level("INFO")
+    denied, denied_api, denied_metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    denied_api.http_status = 401
+    denied_api.http_status_on = "list"
+    await denied.poll()
+    assert denied_api.writes() == []
+    assert denied_api.objects[0]["enabled"] is True
+    assert "status=401" in caplog.text
+    assert API_KEY not in caplog.text
+
+    forbidden, forbidden_api, forbidden_metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    forbidden_api.http_status = 403
+    forbidden_api.http_status_on = "read"
+    await forbidden.poll()
+    assert forbidden_api.writes() == []
+    assert forbidden_api.objects[0]["enabled"] is True
+    assert "status=403" in caplog.text
+
+    broken, broken_api, broken_metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    broken_api.http_status = 500
+    broken_api.http_status_on = "put"
+    await broken.poll()
+    assert len(broken_api.writes()) == 1
+    assert broken_api.objects[0]["enabled"] is True
+    assert "status=500" in caplog.text
+    for metrics in (denied_metrics, forbidden_metrics, broken_metrics):
+        text = generate_latest(metrics._registry).decode()
+        assert "wifi_automation_poll_failures_total 1.0" in text
+        assert "wifi_automation_last_success_timestamp_seconds" not in text
+
+
+async def test_pagination_error_writes_nothing(tmp_path, caplog):
+    caplog.set_level("INFO")
+    service, api, metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [network_object(enabled=True)],
+        chicago(2026, 8, 24, 18),
+    )
+    api.pagination = "offset"
+    await service.poll()
     assert api.writes() == []
+    assert api.objects[0]["enabled"] is True
+    assert "pagination" in caplog.text
+    assert "wifi_automation_poll_failures_total 1.0" in generate_latest(metrics._registry).decode()
+
+
+async def test_info_logs_do_not_include_the_object_body(tmp_path, caplog):
+    caplog.set_level("DEBUG")
+    obj = network_object(enabled=True)
+    obj["body_marker"] = "BODY-MARKER-9f3a"
+    service, _api, _metrics = _build(
+        tmp_path,
+        [_task(complete=True)],
+        [obj],
+        chicago(2026, 8, 24, 18),
+    )
+    await service.poll()
+    info = "\n".join(record.message for record in caplog.records if record.levelname == "INFO")
+    debug = "\n".join(record.message for record in caplog.records if record.levelname == "DEBUG")
+    for text in (info, debug):
+        assert "BODY-MARKER-9f3a" not in text
+        assert MAC not in text
+        assert CLIENT_IP not in text
+        assert "targets" not in text
+        assert API_KEY not in text
+    assert "unlock=True" in info
+    assert "lock=False" in info
 
 
 async def test_write_failure_stops_later_children(tmp_path):
