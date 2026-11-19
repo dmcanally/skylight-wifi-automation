@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from skylight_wifi_automation.config import load_config
 from skylight_wifi_automation.tls import build_ssl_context
 
 
@@ -86,6 +87,44 @@ def _connect(port: int, pem: str, server_hostname: str) -> None:
         raw.close()
         raise
     tls.close()
+
+
+def test_trust_store_loads_only_the_pinned_cert(tmp_path):
+    pem = load_config("config.example.yaml").unifi_tls_ca
+    if not pem.endswith("\n"):
+        pem += "\n"
+    der_file = tmp_path / "pin.pem"
+    der_file.write_text(pem, encoding="utf-8")
+    der = subprocess.check_output(["openssl", "x509", "-in", str(der_file), "-outform", "DER"])
+    context = build_ssl_context(pem)
+    stats = context.cert_store_stats()
+    assert stats["x509"] == 1
+    assert context.get_ca_certs(binary_form=True) == [der]
+    source = Path("src/skylight_wifi_automation/tls.py").read_text(encoding="utf-8")
+    assert "create_default_context" not in source
+    assert "load_default_certs" not in source
+
+
+def test_a_certificate_from_another_ca_is_rejected(tmp_path):
+    pinned_dir = tmp_path / "pinned"
+    other_dir = tmp_path / "other"
+    pinned_dir.mkdir()
+    other_dir.mkdir()
+    pinned, _pinned_cert, _pinned_key = _cert(pinned_dir, "unifi.local")
+    _other_pem, other_cert, other_key = _cert(other_dir, "unifi.local")
+    ports: list[int] = []
+    thread = threading.Thread(target=_serve, args=(other_cert, other_key, ports), daemon=True)
+    thread.start()
+    while not ports:
+        thread.join(0.05)
+    context = build_ssl_context(pinned)
+    raw = socket.create_connection(("127.0.0.1", ports[0]), timeout=5)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        try:
+            context.wrap_socket(raw, server_hostname="unifi.local")
+        finally:
+            raw.close()
+    thread.join(5)
 
 
 def test_ssl_context_keeps_verification_and_clears_only_the_strict_flag(tmp_path):

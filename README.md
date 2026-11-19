@@ -9,9 +9,10 @@ UCG Max. Active or resumed means blocked. Paused means the child has internet.
 Pausing the object hides its generated Block policy. The app does not edit
 Policy Table firewall policies, and it does not create or delete objects.
 
-`dry_run: true` is how this ships. Dry-run makes zero object writes: it does
-not pause and it does not resume. It logs the action it would have taken and
-does nothing.
+`dry_run: true` is how this ships. Dry-run makes zero UniFi object writes: it
+does not pause and it does not resume. It still writes the daily latch file
+when a child earns access. It logs the action it would have taken and does
+nothing to the gateway.
 
 Deployed manifests live in the kubernetes repo (`wifi-automation/`). This
 repository does not publish the image by hand. A GitHub release tagged
@@ -23,8 +24,9 @@ linux/amd64 and linux/arm64.
 Children are blocked by default. A child is unblocked for the rest of the
 local day once every required task is complete or skipped. The daily latch
 `unlocked_on[child]` keeps that access if a task is unchecked or added later
-the same day. The latch is stored in `/tmp` (the pod emptyDir) and is dropped
-on the next local date.
+the same day. The latch is stored in `/tmp/skylight-wifi-latch.json` (the pod
+emptyDir) and is dropped on the next local date. Dry-run still writes that
+file. Only UniFi object writes are disabled.
 
 At or after the cutoff the child is locked, including when Skylight is
 unreachable. Cutoffs come from config: 20:30 for Lanie and Libby, 20:00 for
@@ -64,13 +66,13 @@ Environment variables, from the `wifi-automation-secrets` Secret:
 | --- | --- | --- |
 | `timezone` | `America/Chicago` | Latch day and cutoffs |
 | `poll_seconds` | `60` | Delay between polls |
-| `dry_run` | `true` | `true` means no pause and no resume |
+| `dry_run` | `true` | `true` means no pause and no resume. The latch file is still written. |
 | `include_late` | `true` | Count overdue Skylight tasks |
 | `include_routines` | `true` | Count routines |
 | `empty_day_unlocks` | `false` | `false` keeps an empty day blocked |
 | `unifi_url` | | `https://unifi.local/proxy/network/integration/v1` |
 | `unifi_site` | discover | Optional site UUID, `internalReference`, or name |
-| `unifi_tls_ca` | | PEM trust anchor for `unifi.local` |
+| `unifi_tls_ca` | | Only trust anchor loaded for `unifi.local` |
 | `children[].name` | | Log name |
 | `children[].skylight_profile` | | Skylight profile label |
 | `children[].object_name` | | Object Manager object, looked up by name every poll |
@@ -183,8 +185,12 @@ Do not `PATCH` or `PUT` `/proxy/network/integration/v1/sites/{siteId}/firewall/p
 ## TLS
 
 Verification stays on. The hostname check is `unifi.local`, which is the host
-in `unifi_url`. `hostAliases` maps that name to `192.168.1.1`. The trust store
-is only `unifi_tls_ca`.
+in `unifi_url`. `hostAliases` maps that name to `192.168.1.1`.
+
+The TLS context is `ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)`. That constructor
+does not load the system CA store. The only trust anchor is
+`load_verify_locations(cadata=unifi_tls_ca)`. A public certificate such as
+`github.com` is rejected because it was not signed by that pin.
 
 The stock certificate is self-signed, CN and DNS SAN `unifi.local`, and it
 has no `basicConstraints` extension. The image stays on Python 3.12, and the

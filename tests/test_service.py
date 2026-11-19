@@ -64,6 +64,7 @@ async def test_dry_run_logs_the_toggle_and_never_writes(tmp_path, caplog):
     )
     await service.poll()
     assert api.writes() == []
+    assert "Lanie" in (tmp_path / "latch.json").read_text(encoding="utf-8")
     assert "unlock=True" in caplog.text
     assert "lock=False" in caplog.text
     assert "action=pause" in caplog.text

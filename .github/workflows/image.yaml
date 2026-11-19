@@ -24,12 +24,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tags
         shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           image=ghcr.io/dmcanally/skylight-wifi-automation
           tags="${image}:${GITHUB_SHA}"
           if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            tag="${{ github.event_name == 'release' && github.event.release.tag_name || '' }}"
-            tag="${tag#v}"
+            tag="${TAG#v}"
             tags="${tags}"$'\n'"${image}:${tag}"
           else
             tags="${tags}"$'\n'"${image}:latest"
