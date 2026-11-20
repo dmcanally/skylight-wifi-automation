@@ -23,9 +23,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     PATH="/app/.venv/bin:$PATH"
 
-RUN useradd --create-home --uid 10001 app
+# /data holds app.db. Mount a volume writable by uid 10001.
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /data \
+    && chown app:app /data \
+    && chmod 0700 /data
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 USER 10001
+VOLUME ["/data"]
 EXPOSE 8080
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('UI_PORT', '8000') + '/healthz', timeout=3)"
 ENTRYPOINT ["skylight-wifi"]

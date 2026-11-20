@@ -23,6 +23,15 @@ class SkylightClient:
         self._password = password
         self._client: Skylight | None = None
 
+    def __repr__(self) -> str:
+        return "SkylightClient(email='[redacted]')"
+
+    async def ping(self) -> None:
+        """Read-only login check: list frames. The result is not logged."""
+        if self._client is None:
+            raise RuntimeError("skylight client is closed")
+        await self._client.get_frames()
+
     async def __aenter__(self) -> Self:
         self._client = Skylight(PasswordAuth(self._email, self._password))
         await self._client.__aenter__()

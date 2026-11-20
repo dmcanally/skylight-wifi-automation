@@ -23,3 +23,16 @@ class ChildDecision:
     @property
     def should_lock(self) -> bool:
         return not self.should_unlock
+
+
+@dataclass(frozen=True)
+class ChildPoll:
+    """Safe dashboard fields from the latest poll. No secrets and no object body."""
+
+    name: str
+    complete: int
+    required: int
+    blocked: bool | None
+    reason: str
+    action: str
+    write: bool

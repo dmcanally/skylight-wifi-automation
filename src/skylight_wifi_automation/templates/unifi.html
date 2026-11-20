@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>UniFi connection</h1>
+<form method="post" action="/unifi">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label for="unifi_url">URL</label>
+  <input id="unifi_url" name="unifi_url" value="{{ config.unifi_url }}" {% if read_only %}disabled{% endif %}>
+  <label for="unifi_site">Site</label>
+  <input id="unifi_site" name="unifi_site" value="{{ config.unifi_site or '' }}" {% if read_only %}disabled{% endif %}>
+  <label for="unifi_tls_ca">Pinned CA PEM</label>
+  <textarea id="unifi_tls_ca" name="unifi_tls_ca" {% if read_only %}disabled{% endif %}>{{ config.unifi_tls_ca }}</textarea>
+  {% if not read_only %}<button type="submit">Save</button>{% endif %}
+</form>
+{% endblock %}

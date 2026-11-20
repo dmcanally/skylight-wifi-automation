@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Setup is disabled</h1>
+<p>ADMIN_SETUP_TOKEN is unset or shorter than 32 characters, so the first admin cannot be created. Set that environment variable to a long random value of at least 32 characters, restart the process, and open this page again. There is no default password.</p>
+{% endblock %}

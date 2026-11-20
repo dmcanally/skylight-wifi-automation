@@ -11,6 +11,7 @@ unifi_url: "https://unifi.local/proxy/network/integration/v1"
 # Optional site UUID, internalReference, or name. Omit on a one-site gateway.
 # unifi_site:
 # Placeholder only. Paste the gateway console certificate. Not a secret.
+# The app rejects this placeholder at startup and when the certificate is saved.
 # Re-pin before it expires or after a firmware reset that regenerates it.
 unifi_tls_ca: |
   -----BEGIN CERTIFICATE-----
