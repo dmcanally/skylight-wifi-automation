@@ -18,11 +18,15 @@
       {% if user %}
       <nav class="nav" aria-label="Primary">
         <a href="/">Dashboard</a>
+        <a href="/sessions">Sessions</a>
+        {% if user.role == "admin" %}
         <a href="/children">Schedule</a>
         <a href="/settings">Settings</a>
         <a href="/unifi">UniFi</a>
         <a href="/secrets">Secrets</a>
         <a href="/audit">Audit</a>
+        <a href="/users">Users</a>
+        {% endif %}
         <a href="/password">Password</a>
         <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf }}">

@@ -77,4 +77,4 @@ def test_two_setup_posts_create_one_admin(tmp_path):
             return list(await asyncio.gather(post(tokens[0]), post(tokens[1])))
 
     assert sorted(asyncio.run(run())) == [303, 404]
-    assert len(db_rows(bundle.store.path, "SELECT username FROM admin")) == 1
+    assert len(db_rows(bundle.store.path, "SELECT username FROM users")) == 1

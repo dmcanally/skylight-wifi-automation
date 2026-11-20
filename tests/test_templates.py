@@ -3,7 +3,18 @@ from __future__ import annotations
 from starlette.testclient import TestClient
 from tests.uiutil import build, setup_admin, sign_in
 
-LOGGED_IN_PAGES = ("/", "/children", "/settings", "/unifi", "/secrets", "/audit", "/password", "/login")
+LOGGED_IN_PAGES = (
+    "/",
+    "/children",
+    "/settings",
+    "/unifi",
+    "/secrets",
+    "/audit",
+    "/password",
+    "/login",
+    "/users",
+    "/sessions",
+)
 
 
 def _assert_document(html: str) -> None:

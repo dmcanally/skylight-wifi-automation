@@ -41,7 +41,7 @@ from .overrides import ConfirmationRequired, OverrideError, override_expiry
 from .runtime import test_connections
 from .secrets import SECRET_NAMES
 from .security import constant_equal
-from .store import SETUP_LOCK_SUBJECT, ConfigWriteError, Store
+from .store import SETUP_LOCK_SUBJECT, ConfigWriteError, LastAdminError, Store
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ class Visitor:
     username: str
     csrf: str
     token: str
+    role: str = "admin"
 
 
 @dataclass
@@ -156,6 +157,46 @@ def origin_failure(request: Request) -> str | None:
 
 def same_origin(request: Request) -> bool:
     return origin_failure(request) is None
+
+
+def coarse_user_agent(value: str) -> str:
+    text = " ".join((value or "").split())
+    if "Edg/" in text:
+        browser = "Edge"
+    elif "Chrome/" in text:
+        browser = "Chrome"
+    elif "Firefox/" in text:
+        browser = "Firefox"
+    elif "Safari/" in text:
+        browser = "Safari"
+    else:
+        browser = "Browser"
+    if "iPhone" in text or "iPad" in text:
+        system = "iOS"
+    elif "Android" in text:
+        system = "Android"
+    elif "Mac OS X" in text or "Macintosh" in text:
+        system = "macOS"
+    elif "Windows" in text:
+        system = "Windows"
+    elif "Linux" in text:
+        system = "Linux"
+    else:
+        system = "Unknown"
+    return f"{browser} on {system}"
+
+
+def admin_only(request: Request) -> HTMLResponse | None:
+    user = current_user(request)
+    if user is not None and user.role == "admin":
+        return None
+    return render(
+        request,
+        "blocked.html",
+        title="Not allowed",
+        message="You do not have access to that page.",
+        status_code=403,
+    )
 
 
 def _log_rejection(request: Request, check: str) -> None:
@@ -335,11 +376,26 @@ def blocked_page(request: Request) -> HTMLResponse:
     )
 
 
+def _admin_path(path: str) -> bool:
+    if path in {"/settings", "/unifi", "/audit", "/users", "/children"}:
+        return True
+    return path.startswith(("/children/", "/secrets", "/users/"))
+
+
 async def stale_page(request: Request) -> Response:
     """Re-render the form that was posted, with a fresh token and a notice."""
     context: AppContext = request.app.state.context
     path = request.url.path
     notice = STALE_MESSAGE
+    user = current_user(request)
+    if _admin_path(path) and (user is None or user.role != "admin"):
+        return render(
+            request,
+            "blocked.html",
+            title="Not allowed",
+            message="You do not have access to that page.",
+            status_code=403,
+        )
     if path == "/login":
         return await login_page(request, notice=notice, status_code=403)
     if path == "/setup":
@@ -397,6 +453,10 @@ async def stale_page(request: Request) -> Response:
         )
     if path == "/password":
         return render(request, "password.html", title="Password", notice=notice, status_code=403)
+    if path == "/users" or path.startswith("/users/"):
+        return await users_page(request, notice=notice, status_code=403)
+    if path == "/sessions" or path.startswith("/sessions/"):
+        return await sessions_page(request, notice=notice, status_code=403)
     return await dashboard(request, notice=notice, status_code=403)
 
 
@@ -446,7 +506,7 @@ async def load_user(request: Request) -> Visitor | None:
     session = await context.store.use_session(token, context.clock())
     if session is None:
         return None
-    return Visitor(session.username, session.csrf, token)
+    return Visitor(session.username, session.csrf, token, session.role)
 
 
 def unauthorized(method: str) -> Response:
@@ -561,7 +621,13 @@ async def login(request: Request) -> Response:
         action = "lockout" if result.locked else "login_failure"
         await context.store.add_audit(result.username, action, result.username, {"result": action}, now)
         return await login_page(request, error="Sign-in failed.")
-    token, _csrf = await context.store.create_session(result.username, now)
+    remember = str(form.get("remember") or "") == "1"
+    token, _csrf = await context.store.create_session(
+        result.username,
+        now,
+        remember,
+        coarse_user_agent(request.headers.get("user-agent", "")),
+    )
     await context.store.add_audit(result.username, "login", result.username, {"result": "ok"}, now)
     response = RedirectResponse("/", status_code=303)
     session_cookie(response, token, context.cookie_secure)
@@ -741,6 +807,9 @@ async def clear_override(request: Request) -> Response:
 
 
 async def settings(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     config = await current_config(context)
     if request.method == "GET":
@@ -786,6 +855,9 @@ async def settings(request: Request) -> Response:
 
 
 async def children(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     config = await current_config(context)
     rows = await context.store.list_children() if context.source == "db" else []
@@ -830,6 +902,9 @@ async def children(request: Request) -> Response:
 
 
 async def update_child(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     blocked = read_only_blocked(context)
     if blocked is not None:
@@ -881,6 +956,9 @@ async def update_child(request: Request) -> Response:
 
 
 async def delete_child(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     blocked = read_only_blocked(context)
     if blocked is not None:
@@ -924,6 +1002,9 @@ def _child_errors(label: str, profile: str, object_name: str, cutoff: str) -> li
 
 
 async def unifi(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     config = await current_config(context)
     if request.method == "GET":
@@ -949,6 +1030,9 @@ async def unifi(request: Request) -> Response:
 
 
 async def secrets(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     statuses = await context.store.secret_statuses()
     test_result = clean_test_result(request.query_params.get("test"))
@@ -985,6 +1069,9 @@ async def secrets(request: Request) -> Response:
 
 
 async def clear_secret(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     if not context.store.encryption_enabled:
         return PlainTextResponse("Secret storage is disabled.", status_code=403)
@@ -997,6 +1084,9 @@ async def clear_secret(request: Request) -> Response:
 
 
 async def test_secret_connections(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     secrets = await context.store.resolve_secrets()
     try:
@@ -1013,7 +1103,10 @@ async def test_secret_connections(request: Request) -> Response:
     return RedirectResponse(f"/secrets?test={quote(safe)}", status_code=303)
 
 
-async def audit(request: Request) -> HTMLResponse:
+async def audit(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
     context: AppContext = request.app.state.context
     raw = request.query_params.get("page", "1")
     try:
@@ -1036,12 +1129,12 @@ async def password(request: Request) -> Response:
     new_password = str(form.get("new_password") or "")
     confirm = str(form.get("password2") or "")
     now = context.clock()
-    admin = await context.store.get_admin()
+    account = await context.store.get_user(user.username)
     ip = client_ip(request)
     locked = await context.store.login_is_locked(user.username, ip, now)
     current_ok = False
-    if admin is not None and admin.username == user.username and not locked:
-        current_ok = await verify_password_off_loop(context.hasher, admin.password_hash, current)
+    if account is not None and not account.disabled and not locked:
+        current_ok = await verify_password_off_loop(context.hasher, account.password_hash, current)
     else:
         await verify_password_off_loop(context.hasher, context.dummy_hash, current or "x")
     if not current_ok:
@@ -1064,12 +1157,225 @@ async def password(request: Request) -> Response:
     if errors:
         return render(request, "password.html", title="Password", errors=errors, status_code=400)
     new_hash = await hash_password_off_loop(context.hasher, new_password)
-    await context.store.set_password(user.username, new_hash, now)
-    await context.store.delete_user_sessions(user.username)
-    token, _csrf = await context.store.create_session(user.username, now)
-    response = RedirectResponse("/password?saved=1", status_code=303)
-    session_cookie(response, token, context.cookie_secure)
-    return response
+    await context.store.set_password(user.username, new_hash, now, user.token)
+    return RedirectResponse("/password?saved=1", status_code=303)
+
+
+@dataclass
+class ShownSession:
+    id: int
+    username: str
+    created_text: str
+    seen_text: str
+    agent: str
+    current: bool
+    remember: bool
+
+
+async def users_page(
+    request: Request,
+    errors: list[str] | None = None,
+    notice: str = "",
+    status_code: int = 200,
+) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    context: AppContext = request.app.state.context
+    rows = await context.store.list_users()
+    return render(
+        request,
+        "users.html",
+        title="Users",
+        rows=rows,
+        errors=errors or [],
+        notice=notice,
+        status_code=status_code,
+    )
+
+
+async def users(request: Request) -> Response:
+    if request.method == "GET":
+        return await users_page(request)
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    context: AppContext = request.app.state.context
+    form: FormData = request.state.form
+    username = str(form.get("username") or "").strip()
+    password = str(form.get("password") or "")
+    confirm = str(form.get("password2") or "")
+    role = str(form.get("role") or "")
+    errors: list[str] = []
+    name_error = username_problem(username)
+    if name_error:
+        errors.append(name_error)
+    password_error = password_problem(password)
+    if password_error:
+        errors.append(password_error)
+    if password != confirm:
+        errors.append("Passwords do not match.")
+    if role not in {"admin", "member"}:
+        errors.append("role: choose admin or member")
+    if errors:
+        return await users_page(request, errors=errors, status_code=400)
+    user = current_user(request)
+    actor = user.username if user else "unknown"
+    try:
+        password_hash = await hash_password_off_loop(context.hasher, password)
+        await context.store.create_user(actor, context.clock(), username, password_hash, role)
+    except ConfigWriteError as exc:
+        return await users_page(request, errors=exc.errors, status_code=400)
+    return RedirectResponse("/users?saved=1", status_code=303)
+
+
+async def set_user_role(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    return await _change_user(request, "role")
+
+
+async def disable_user(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    return await _change_user(request, "disable")
+
+
+async def enable_user(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    return await _change_user(request, "enable")
+
+
+async def delete_user_account(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    return await _change_user(request, "delete")
+
+
+async def reset_user_password(request: Request) -> Response:
+    denied = admin_only(request)
+    if denied is not None:
+        return denied
+    return await _change_user(request, "password")
+
+
+async def _change_user(request: Request, action: str) -> Response:
+    context: AppContext = request.app.state.context
+    username = str(request.path_params["username"])
+    if username_problem(username):
+        return PlainTextResponse("Not found.", status_code=404)
+    form: FormData = request.state.form
+    user = current_user(request)
+    actor = user.username if user else "unknown"
+    now = context.clock()
+    try:
+        if action == "role":
+            await context.store.set_role(username, str(form.get("role") or ""), actor, now)
+        elif action == "disable":
+            await context.store.set_disabled(username, True, actor, now)
+        elif action == "enable":
+            await context.store.set_disabled(username, False, actor, now)
+        elif action == "delete":
+            await context.store.delete_user(username, actor, now)
+        elif action == "password":
+            new_password = str(form.get("new_password") or "")
+            confirm = str(form.get("password2") or "")
+            errors: list[str] = []
+            problem = password_problem(new_password)
+            if problem:
+                errors.append(problem)
+            if new_password != confirm:
+                errors.append("Passwords do not match.")
+            if errors:
+                return await users_page(request, errors=errors, status_code=400)
+            password_hash = await hash_password_off_loop(context.hasher, new_password)
+            keep = user.token if user is not None and user.username == username else ""
+            await context.store.reset_password(actor, username, password_hash, now, keep)
+    except LastAdminError as exc:
+        return await users_page(request, errors=[str(exc)], status_code=400)
+    except ConfigWriteError as exc:
+        return await users_page(request, errors=exc.errors, status_code=400)
+    except KeyError:
+        return PlainTextResponse("Not found.", status_code=404)
+    return RedirectResponse("/users?saved=1", status_code=303)
+
+
+async def sessions_page(
+    request: Request,
+    errors: list[str] | None = None,
+    notice: str = "",
+    status_code: int = 200,
+) -> Response:
+    context: AppContext = request.app.state.context
+    user = current_user(request)
+    if user is None:
+        return unauthorized(request.method)
+    config = await current_config(context)
+    scope = None if user.role == "admin" else user.username
+    rows = await context.store.list_sessions(user.token, scope)
+    shown = [
+        ShownSession(
+            item.id,
+            item.username,
+            format_local(item.created_at, config.timezone),
+            format_local(item.last_seen, config.timezone),
+            item.user_agent,
+            item.current,
+            item.remember,
+        )
+        for item in rows
+    ]
+    return render(
+        request,
+        "sessions.html",
+        title="Sessions",
+        rows=shown,
+        errors=errors or [],
+        notice=notice,
+        status_code=status_code,
+    )
+
+
+async def sessions(request: Request) -> Response:
+    return await sessions_page(request)
+
+
+async def revoke_session(request: Request) -> Response:
+    context: AppContext = request.app.state.context
+    user = current_user(request)
+    if user is None:
+        return unauthorized(request.method)
+    session_id = int(request.path_params["session_id"])
+    try:
+        await context.store.revoke_session(
+            session_id,
+            user.username,
+            context.clock(),
+            username=user.username,
+            admin=user.role == "admin",
+        )
+    except PermissionError:
+        return render(
+            request,
+            "blocked.html",
+            title="Not allowed",
+            message="You do not have access to that page.",
+            status_code=403,
+        )
+    except KeyError:
+        return PlainTextResponse("Not found.", status_code=404)
+    if user.role != "admin":
+        still = await context.store.list_sessions(user.token, user.username)
+        if not any(item.current for item in still):
+            response = RedirectResponse("/login", status_code=303)
+            clear_session_cookie(response, context.cookie_secure)
+            return response
+    return RedirectResponse("/sessions?saved=1", status_code=303)
 
 
 async def unhandled(request: Request, exc: Exception) -> Response:
@@ -1107,6 +1413,14 @@ def create_app(context: AppContext) -> Starlette:
         Route("/secrets/{name}/clear", post_guard(clear_secret), methods=["POST"]),
         Route("/audit", audit, methods=["GET"]),
         Route("/password", post_guard(password), methods=["GET", "POST"]),
+        Route("/users", post_guard(users), methods=["GET", "POST"]),
+        Route("/users/{username}/role", post_guard(set_user_role), methods=["POST"]),
+        Route("/users/{username}/disable", post_guard(disable_user), methods=["POST"]),
+        Route("/users/{username}/enable", post_guard(enable_user), methods=["POST"]),
+        Route("/users/{username}/delete", post_guard(delete_user_account), methods=["POST"]),
+        Route("/users/{username}/password", post_guard(reset_user_password), methods=["POST"]),
+        Route("/sessions", post_guard(sessions), methods=["GET"]),
+        Route("/sessions/{session_id:int}/revoke", post_guard(revoke_session), methods=["POST"]),
         Route("/overrides/{child_id:int}", post_guard(set_override), methods=["POST"]),
         Route("/overrides/{child_id:int}/clear", post_guard(clear_override), methods=["POST"]),
         Mount("/static", app=StaticFiles(directory=_PACKAGE / "static"), name="static"),

@@ -94,10 +94,12 @@ async def attempt_login(
     if await store.login_is_locked(safe_name, safe_ip, now):
         await verify_password_off_loop(hasher, dummy_hash, password or "x")
         return LoginResult(False, True, safe_name)
-    admin = await store.get_admin()
-    if admin is not None and admin.username == safe_name and password:
-        ok = await verify_password_off_loop(hasher, admin.password_hash, password)
-        canonical = admin.username
+    account = await store.get_user(safe_name)
+    if account is not None and password:
+        ok = await verify_password_off_loop(hasher, account.password_hash, password)
+        canonical = account.username
+        if account.disabled:
+            ok = False
     else:
         await verify_password_off_loop(hasher, dummy_hash, password or "x")
         ok = False
