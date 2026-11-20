@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -36,13 +37,13 @@ def _member(bundle) -> None:
 def _ids(html: str) -> list[str]:
     import re
 
-    return re.findall(r'action="/sessions/(\d+)/revoke"', html)
+    return re.findall(r'action="/sessions/([^"]+)/revoke"', html)
 
 
 def _current(html: str) -> str:
     import re
 
-    match = re.search(r'data-current="yes".*?action="/sessions/(\d+)/revoke"', html, re.DOTALL)
+    match = re.search(r'data-current="yes".*?action="/sessions/([^"]+)/revoke"', html, re.DOTALL)
     assert match, html
     return match.group(1)
 
@@ -244,7 +245,7 @@ def test_revoke_own_session_and_not_someone_elses(tmp_path):
             headers=ORIGIN,
             follow_redirects=False,
         )
-        assert denied.status_code == 403
+        assert denied.status_code == 404
         assert owner.get("/", follow_redirects=False).status_code == 200
         assert other.get("/", follow_redirects=False).status_code == 303
         assert "token_hash" not in own.text
@@ -283,7 +284,7 @@ def test_v1_admin_row_migrates_once(tmp_path):
             failed_count INTEGER NOT NULL DEFAULT 0,
             locked_until TEXT
         );
-        INSERT INTO admin(username, password_hash, failed_count) VALUES ('admin', '$argon2id$kept', 2);
+        INSERT INTO admin(username, password_hash, failed_count) VALUES ('Admin', '$argon2id$kept', 2);
         CREATE TABLE sessions (
             token_hash TEXT PRIMARY KEY,
             csrf TEXT NOT NULL,
@@ -309,20 +310,30 @@ def test_v1_admin_row_migrates_once(tmp_path):
     token = "migrated-session-token"
     connection.execute(
         """INSERT INTO sessions(token_hash, csrf, username, created_at, expires_at, last_seen)
-           VALUES (?, 'csrf-value', 'admin', ?, ?, ?)""",
+           VALUES (?, 'csrf-value', 'Admin', ?, ?, ?)""",
         (hash_token(token), dump_dt(now), dump_dt(now + timedelta(days=3)), dump_dt(now)),
     )
     connection.commit()
     connection.close()
-    store = Store(path, None)
+    moment = datetime(2026, 8, 24, 18, tzinfo=UTC)
+    store = Store(path, None, lambda: moment)
     try:
-        account = asyncio.run(store.get_user("admin"))
+        account = asyncio.run(store.get_user("ADMIN"))
         assert account is not None
+        assert account.username == "Admin"
         assert account.role == "admin"
         assert account.password_hash == "$argon2id$kept"
         assert account.failed_count == 2
+        created = db_rows(path, "SELECT created_at FROM users")[0]["created_at"]
+        assert created == dump_dt(moment)
+        backups = list(path.parent.glob("app.db.bak-*"))
+        assert len(backups) == 1
+        assert backups[0].stat().st_mode & 0o777 == 0o600
+        saved = sqlite3.connect(backups[0])
+        assert saved.execute("SELECT username FROM admin").fetchone()[0] == "Admin"
+        saved.close()
         session = asyncio.run(store.use_session(token, now))
-        assert session is not None and session.username == "admin"
+        assert session is not None and session.username == "Admin"
         assert db_rows(path, "SELECT label FROM children")[0]["label"] == "Alex"
         versions = {row["version"] for row in db_rows(path, "SELECT version FROM schema_version")}
         assert versions == {1, 2}
@@ -335,3 +346,290 @@ def test_v1_admin_row_migrates_once(tmp_path):
     finally:
         again.close()
     assert not db_rows(path, "SELECT 1 AS present FROM sqlite_master WHERE name = 'admin'")
+    assert len(list(path.parent.glob("app.db.bak-*"))) == 1
+
+
+def _cookie_value(header: str) -> str:
+    return header.split(";", 1)[0].split("=", 1)[1]
+
+
+def test_remember_cookie_slides_and_stops_at_ninety_days(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        client.cookies.clear()
+        page = client.get("/login")
+        signed = client.post(
+            "/login",
+            data={
+                "csrf_token": csrf_from(page.text),
+                "username": USERNAME,
+                "password": PASSWORD,
+                "remember": "1",
+            },
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        header = signed.headers["set-cookie"]
+        assert "max-age=2592000" in header.lower()
+        value = _cookie_value(header)
+        client.cookies.clear()
+        quiet = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+        assert quiet.status_code == 200
+        assert "set-cookie" not in {name.lower() for name in quiet.headers}
+        bundle.clock.moment += timedelta(days=25)
+        slid = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+        assert slid.status_code == 200
+        assert "max-age=2592000" in slid.headers["set-cookie"].lower()
+        bundle.clock.moment += timedelta(days=25)
+        client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+        bundle.clock.moment += timedelta(days=20)
+        clipped = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+        assert clipped.status_code == 200
+        clipped_age = int(clipped.headers["set-cookie"].lower().split("max-age=")[1].split(";", 1)[0])
+        assert 0 < clipped_age < 2592000
+        bundle.clock.moment += timedelta(days=21)
+        expired = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+    assert expired.status_code == 303
+
+
+def test_short_session_cookie_has_no_max_age_and_dies_at_twelve_hours(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        client.cookies.clear()
+        page = client.get("/login")
+        signed = client.post(
+            "/login",
+            data={"csrf_token": csrf_from(page.text), "username": USERNAME, "password": PASSWORD},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        header = signed.headers["set-cookie"]
+        assert "max-age" not in header.lower()
+        assert "expires=" not in header.lower()
+        value = _cookie_value(header)
+        client.cookies.clear()
+        connection = sqlite3.connect(bundle.store.path)
+        connection.execute(
+            "UPDATE sessions SET expires_at = ?",
+            (dump_dt(bundle.clock.moment + timedelta(days=30)),),
+        )
+        connection.commit()
+        connection.close()
+        bundle.clock.moment += timedelta(hours=12, seconds=1)
+        blocked = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+    assert blocked.status_code == 303
+
+
+def test_login_replaces_the_browsers_previous_session(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        client.cookies.clear()
+        page = client.get("/login")
+        first = client.post(
+            "/login",
+            data={"csrf_token": csrf_from(page.text), "username": USERNAME, "password": PASSWORD},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        old = _cookie_value(first.headers["set-cookie"])
+        client.cookies.clear()
+        page = client.get("/login")
+        second = client.post(
+            "/login",
+            data={"csrf_token": csrf_from(page.text), "username": USERNAME, "password": PASSWORD},
+            headers={**SAME_SITE, "cookie": f"{PLAIN_SESSION_COOKIE}={old}"},
+            follow_redirects=False,
+        )
+        new = _cookie_value(second.headers["set-cookie"])
+        assert new != old
+        client.cookies.clear()
+        stale = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={old}"},
+            follow_redirects=False,
+        )
+        fresh = client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={new}"},
+            follow_redirects=False,
+        )
+    assert stale.status_code == 303
+    assert fresh.status_code == 200
+
+
+def test_session_ids_are_not_reused(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        first = _current(client.get("/sessions").text)
+        client.post(
+            f"/sessions/{first}/revoke",
+            data={"csrf_token": csrf_from(client.get("/sessions").text)},
+            headers=ORIGIN,
+            follow_redirects=False,
+        )
+        page = client.get("/login")
+        client.post(
+            "/login",
+            data={"csrf_token": csrf_from(page.text), "username": USERNAME, "password": PASSWORD},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        second = _current(client.get("/sessions").text)
+        assert first != second
+        missed = client.post(
+            f"/sessions/{first}/revoke",
+            data={"csrf_token": csrf_from(client.get("/sessions").text)},
+            headers=ORIGIN,
+            follow_redirects=False,
+        )
+        assert missed.status_code == 404
+        assert client.get("/", follow_redirects=False).status_code == 200
+
+
+def test_expired_sessions_are_pruned_on_login(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        now = bundle.clock()
+        connection = sqlite3.connect(bundle.store.path)
+        connection.execute(
+            """INSERT INTO sessions(
+                   token_hash, public_id, csrf, username, created_at, expires_at, last_seen, remember, user_agent
+               ) VALUES ('expired-hash', 'expired-session', 'csrf', 'admin', ?, ?, ?, 1, '')""",
+            (dump_dt(now), dump_dt(now - timedelta(seconds=1)), dump_dt(now)),
+        )
+        connection.execute(
+            """INSERT INTO sessions(
+                   token_hash, public_id, csrf, username, created_at, expires_at, last_seen, remember, user_agent
+               ) VALUES ('idle-hash', 'idle-session', 'csrf', 'admin', ?, ?, ?, 0, '')""",
+            (
+                dump_dt(now - timedelta(days=2)),
+                dump_dt(now + timedelta(hours=1)),
+                dump_dt(now - timedelta(hours=13)),
+            ),
+        )
+        connection.commit()
+        connection.close()
+        page = client.get("/login")
+        client.post(
+            "/login",
+            data={"csrf_token": csrf_from(page.text), "username": USERNAME, "password": PASSWORD},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+    left = {row["public_id"] for row in db_rows(bundle.store.path, "SELECT public_id FROM sessions")}
+    assert "expired-session" not in left
+    assert "idle-session" not in left
+    assert left
+
+
+def test_usernames_are_case_insensitive(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        token = csrf_from(client.get("/users").text)
+        created = client.post(
+            "/users",
+            data={
+                "csrf_token": token,
+                "username": "Casey",
+                "password": MEMBER_PASSWORD,
+                "password2": MEMBER_PASSWORD,
+                "role": "member",
+            },
+            headers=ORIGIN,
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        token = csrf_from(client.get("/users").text)
+        again = client.post(
+            "/users",
+            data={
+                "csrf_token": token,
+                "username": "casey",
+                "password": MEMBER_PASSWORD,
+                "password2": MEMBER_PASSWORD,
+                "role": "member",
+            },
+            headers=ORIGIN,
+        )
+        assert again.status_code == 400
+        client.post(
+            "/logout",
+            data={"csrf_token": csrf_from(client.get("/").text)},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        assert login(client, username="ADMIN", password=PASSWORD).status_code == 303
+        client.post(
+            "/logout",
+            data={"csrf_token": csrf_from(client.get("/").text)},
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        assert login(client, username="cAsEy", password=MEMBER_PASSWORD).status_code == 303
+
+
+def test_reset_admin_keeps_member_accounts(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    bundle = build(tmp_path)
+    _member(bundle)
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+    from skylight_wifi_automation.main import main
+
+    main(["reset-admin"])
+    names = {row["username"] for row in db_rows(bundle.store.path, "SELECT username, role FROM users")}
+    assert names == {MEMBER}
+    with TestClient(bundle.app) as client:
+        assert client.get("/setup", follow_redirects=False).status_code == 200
+
+
+def test_rejection_log_cannot_be_split_by_a_newline(tmp_path, caplog):
+    from types import SimpleNamespace
+
+    from skylight_wifi_automation.web import _log_rejection
+
+    caplog.set_level(logging.WARNING, logger="skylight_wifi_automation.web")
+    # %0d%0a in the request target is this decoded path.
+    request = SimpleNamespace(
+        method="POST",
+        url=SimpleNamespace(path="/secrets/x\r\nEVIL/clear"),
+        headers={"origin": "https://evil.example"},
+    )
+    _log_rejection(request, "origin_mismatch")
+    records = [record for record in caplog.records if "rejected state-changing" in record.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "%0D%0A" in message
+    assert "EVIL" in message

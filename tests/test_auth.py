@@ -250,8 +250,15 @@ def test_password_change_revokes_other_sessions(tmp_path):
             follow_redirects=False,
         )
         assert changed.status_code == 303
-        assert client.cookies.get(PLAIN_SESSION_COOKIE) == old_cookie
+        new_cookie = changed.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+        assert new_cookie != old_cookie
+        assert "max-age" not in changed.headers["set-cookie"].lower()
+        client.cookies.clear()
+        client.cookies.set(PLAIN_SESSION_COOKIE, new_cookie)
         assert client.get("/", follow_redirects=False).status_code == 200
+        client.cookies.clear()
+        client.cookies.set(PLAIN_SESSION_COOKIE, old_cookie)
+        assert client.get("/", follow_redirects=False).status_code == 303
         assert other.get("/", follow_redirects=False).status_code == 303
         assert login(client, password=PASSWORD).status_code == 200
         assert login(client, password=new_password).status_code == 303
