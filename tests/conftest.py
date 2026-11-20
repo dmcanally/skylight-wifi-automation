@@ -5,7 +5,27 @@ from zoneinfo import ZoneInfo
 
 from skylight_wifi_automation.config import AppConfig, ChildConfig
 
-PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+# Generated for tests. CN=unifi.local. Not a real console certificate.
+PEM = """-----BEGIN CERTIFICATE-----
+MIIDJTCCAg2gAwIBAgIUVg9y3BtgsHUWZO5A3LXZ3wkCjb8wDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLdW5pZmkubG9jYWwwHhcNMjYxMTIwMTU1MDA4WhcNMzYx
+MTE3MTU1MDA4WjAWMRQwEgYDVQQDDAt1bmlmaS5sb2NhbDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAO/BPJGrl++em0MEOfBNZJyXk+2MqXNPAee9gi1L
+gL1ZJmRVwnQc7d+kXoopi5fySGYwOICb+WoBCRLfzVTbw5HCB4s+Xh6OxUwLFX2O
+an3BJgiwSQaj7xW0tdMYj1ab9dtPO4W1UhATL1yi3fiAE4fXl9Dtr2gPMIBXR2fN
+4OLds9kWrR1NIZeQH2QdX5n4jAzaL2O19ex7+fr7gDj6IlU5hb3svj6VWPCKWprq
+wTAF7cDPXP2j8Mulwnm/kHVv+yaxukG+ZayfaF/JzO14e/BuOpmZbOkp2Czes6o0
+WON2ngj60wPrjlxZ3MHJZqzVEL+i1acmQxFXSULrQRVubq0CAwEAAaNrMGkwHQYD
+VR0OBBYEFGgtNf3VXHBGd1QakjizNrFLy/RzMB8GA1UdIwQYMBaAFGgtNf3VXHBG
+d1QakjizNrFLy/RzMA8GA1UdEwEB/wQFMAMBAf8wFgYDVR0RBA8wDYILdW5pZmku
+bG9jYWwwDQYJKoZIhvcNAQELBQADggEBAL4JqntTLPJKp7vHuk//ytd6Tcs4tqVm
+1NCS2697ettnDbuOdqAGQEtWE3XLNcmtCnG/cG23xUtXlRB1mPpcAvaW984YBEHf
+6y+8T6+2VZQfcI/YLpZk40xyAALZB1IMsNPcJRAuJCcT9Q9m1AGBQv4rd+fG8b5w
+hIuPIZwZWx5Q6bAGC9Aobtf7YOMIMN8XGqVyK9lhuB9BGIPbbwbrGrKNhepAweAN
+7JSu+efinkf2Q9Bp4St7iXC2s8nnqPgOauFqO7Ep2Rx0I8mxAWoX37XxGxawtSD+
+td4azV/zSReDBSbGl7Nsh9QmRMmBosCuugxjtEF9fM/tpvMGtTCu3HE=
+-----END CERTIFICATE-----
+"""
 API_KEY = "test-api-key-do-not-log"
 PASSWORD = "test-skylight-password-do-not-log"
 # RFC 7042 documentation MAC, RFC 5737 documentation address, generic device name.

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Create the admin</h1>
+<p>There is no default password. Use at least 12 characters. This page stops working after the admin exists.</p>
+<form method="post" action="/setup">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label for="setup_token">Setup token</label>
+  <input id="setup_token" name="setup_token" type="password" autocomplete="off" required>
+  <label for="username">Username</label>
+  <input id="username" name="username" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" required>
+  <label for="password2">Password again</label>
+  <input id="password2" name="password2" type="password" autocomplete="new-password" required>
+  <button type="submit">Create admin</button>
+</form>
+{% endblock %}

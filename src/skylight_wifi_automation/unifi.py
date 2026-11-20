@@ -75,6 +75,13 @@ class UnifiClient:
         self._site_ref: str | None = None
         self._session: aiohttp.ClientSession | None = None
 
+    def __repr__(self) -> str:
+        return f"UnifiClient(base_url={self._base_url!r}, site={self._site!r})"
+
+    async def list_sites(self) -> list[dict[str, Any]]:
+        """Read-only Integration API site list. Used by the connection test."""
+        return await self._collect(f"{self._base_url}{SITES_PATH}")
+
     async def close(self) -> None:
         if self._session is not None:
             await self._session.close()

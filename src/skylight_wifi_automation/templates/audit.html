@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Audit</h1>
+<p>Page {{ listing.page }} of {{ listing.pages }} ({{ listing.total }}).</p>
+<table>
+  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for row in listing.rows %}
+    <tr>
+      <td>{{ row.ts }}</td>
+      <td>{{ row.actor }}</td>
+      <td>{{ row.action }}</td>
+      <td>{{ row.target }}</td>
+      <td>{{ row.diff }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if listing.page > 1 %}<a href="/audit?page={{ listing.page - 1 }}">Previous</a>{% endif %}
+{% if listing.page < listing.pages %}<a href="/audit?page={{ listing.page + 1 }}">Next</a>{% endif %}
+{% endblock %}

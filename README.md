@@ -26,10 +26,88 @@ environment variables:
 | `SKYLIGHT_PASSWORD` | Skylight password |
 | `UNIFI_API_KEY` | Network Integration API key, sent only as `X-API-KEY` |
 | `CONFIG_PATH` | Config file path. Default `/config/config.yaml` |
+| `CONFIG_SOURCE` | `db` (default) or `file` |
+| `DATA_DIR` | SQLite directory. Default `/data`. Mount a volume writable by uid 10001 |
+| `UI_PORT` | Web UI port. Default `8000` |
+| `APP_ENCRYPTION_KEY` | Base64 of 32 bytes. Required to store secrets in the database |
+| `ADMIN_SETUP_TOKEN` | Required to create the first admin. Unset disables setup |
+| `COOKIE_SECURE` | `false` disables the Secure cookie flag for plain HTTP. Default is Secure |
+| `LATCH_PATH` | Daily latch file. Default `/tmp/skylight-wifi-latch.json` |
 
-Metrics are served on port `8080`. The daily latch file defaults to
-`/tmp/skylight-wifi-latch.json`. A persistent volume is needed later if that
+Metrics are served on port `8080`. The UI is served on port `8000`. The
+database is `$DATA_DIR/app.db`. The daily latch file defaults to
+`/tmp/skylight-wifi-latch.json`.
+
+## Web UI
+
+The UI runs in the same process and event loop as the poller. Static files
+are in the image. There is no separate database server, cache, auth provider,
+or CDN. Do not publish port `8000` or `8080` to the internet. Keep both on
+the LAN or a VPN. There is no SSO and no password recovery.
+
+Mount a volume on `/data` that uid 10001 can write. The image creates that
+directory and runs as uid 10001. The volume holds the admin, sessions,
+database secrets, overrides, and the audit log. Losing it does not remove
+environment-variable secrets. Set `LATCH_PATH=/data/latch.json` if the daily
 latch should survive a restart.
+
+`CONFIG_SOURCE=db` imports `CONFIG_PATH` once when the database has no
+config, then the database is the source of truth. If the YAML file later
+differs, the process logs one warning and does not import it again. Each poll
+uses a validated snapshot. A config or secret change is picked up on the next
+poll without a restart. Invalid input is rejected and the running snapshot
+stays as it was. `CONFIG_SOURCE=file` keeps the file as the only config
+source, and the UI will not save settings, children, the UniFi connection, or
+overrides.
+
+### First run
+
+1. Replace the placeholder in `unifi_tls_ca` with the console certificate.
+   The placeholder text, and a PEM that is not an X.509 certificate, are
+   rejected at startup and when the certificate is saved.
+2. Set `APP_ENCRYPTION_KEY` to the standard base64 encoding of 32 random
+   bytes if secrets should be stored in the database. If it is unset, the
+   secrets page is disabled and `SKYLIGHT_EMAIL`, `SKYLIGHT_PASSWORD`, and
+   `UNIFI_API_KEY` are used.
+3. Set `ADMIN_SETUP_TOKEN` to a long random value. There is no default password.
+4. Open `http://<lan-host>:8000/setup`, create an admin, and use a password
+   of at least 12 characters.
+5. Unset `ADMIN_SETUP_TOKEN` and sign in.
+
+Empty secret fields are left unchanged. Clear removes the database copy and
+the environment variable is used again. A value is shown only as set or not
+set, with its source (`db` or `env`) and, for a database value, when it was
+updated.
+
+`COOKIE_SECURE=false` turns off the Secure flag for plain HTTP on a LAN.
+Leave it unset when the UI is served over HTTPS. The session cookie is
+`__Host-swa_session` (HttpOnly, SameSite=Strict, Path=/).
+
+`skylight-wifi reset-admin` deletes the admin and its sessions so `/setup`
+can be used again. From a shell in the container:
+
+```bash
+skylight-wifi reset-admin
+```
+
+### Schedule overrides
+
+A child has at most one active override. Block and Unblock replace whatever
+is active. The override lasts until the earlier of the child's next cutoff
+and the next local midnight in the configured timezone, and then the normal
+evaluator resumes. Both instants are computed with `zoneinfo` when the
+override is saved and stored as a UTC timestamp. A cutoff of 00:00 is the
+same instant as midnight, so it is not applied twice. An unblock set after
+today's cutoff therefore lasts until midnight. That case requires the
+operator to type `UNBLOCK`. The page shows the computed expiry before the
+word is accepted, and the server checks it again. Clear ends an override
+immediately. Expiry is evaluated on every poll, including after a restart.
+`dry_run` still prevents UniFi writes. An override only changes the action
+that would have been logged.
+
+In file mode, `manual_unblock: true` still unlocks that child until cutoff.
+In database mode the field is imported once as an unblock override and is
+not stored on the child. Old YAML that still contains the field loads.
 
 ## Rules
 
@@ -46,9 +124,10 @@ for child-c.
 
 `empty_day_unlocks` defaults to false. A day with no chores stays blocked.
 
-`manual_unblock` is an optional per-child override. It defaults to false.
-While it is true, and only before cutoff, that child is unblocked without
-waiting on Skylight. Cutoff still locks them.
+In file mode, `manual_unblock` is an optional per-child override. It defaults
+to false. While it is true, and only before cutoff, that child is unblocked
+without waiting on Skylight. Cutoff still locks them. In database mode the
+same flag is migrated once into a manual unblock, described under Web UI.
 
 If Skylight or the UCG is unreachable or returns an error, the current object
 state is left unchanged and the failure is logged. The cutoff lock is the
@@ -81,7 +160,7 @@ Environment variables and the config file path are listed under Deploying.
 | `children[].skylight_profile` | | Skylight profile label |
 | `children[].object_name` | | Object Manager object, looked up by name every poll |
 | `children[].cutoff` | | Local `HH:MM`. At or after this, always lock |
-| `children[].manual_unblock` | `false` | Unlock before cutoff without chores |
+| `children[].manual_unblock` | `false` | File mode only. Database mode migrates `true` into an override |
 
 `config.example.yaml` matches those keys. Values there are examples. Paste
 the gateway console certificate over the placeholder in `unifi_tls_ca`.
@@ -92,8 +171,8 @@ Site discovery uses the published Integration API:
 
 * `GET /proxy/network/integration/v1/sites?offset=&limit=`
 
-Object Manager objects are not in that OpenAPI document (Network 11.0.99,
-44 paths). Firewall-policy `PATCH` cannot set `enabled`, and the generated
+Object Manager objects are not in that OpenAPI document for a current UniFi
+Network version. Firewall-policy `PATCH` cannot set `enabled`, and the generated
 policy is missing while the object is paused. The object itself is the
 object-oriented network config. The same `X-API-KEY` is sent. The site path
 segment is the site `internalReference` from the Integration site list, not
@@ -127,7 +206,7 @@ include only the object id, name, and `enabled`.
 
 ## Gate 4 evidence
 
-Run this on Network 11.0.99 against one test object, not a child's. Use a
+Run this on a current UniFi Network version against one test object, not a child's. Use a
 throwaway client. The local `X-API-KEY` has to be accepted on all three
 calls: `GET /proxy/network/integration/v1/sites`, the v2 list GET, and the
 v2 PUT. A 401 or 403 on any of them means the key is not accepted.
@@ -228,7 +307,9 @@ skylight-wifi --config config.yaml --once
 ## Image
 
 The container runs as uid 10001, with a read-only root filesystem. `/tmp` is
-writable. This repository does not publish the image by hand.
+writable. Mount a volume on `/data` writable by uid 10001. The UI listens on
+port 8000 and Prometheus stays on port 8080. This repository does not publish
+the image by hand.
 `.github/workflows/image.yaml` builds linux/amd64 and linux/arm64. A published
 GitHub release tags the image with that release tag and a leading `v` removed,
 so a release tagged `0.2.1` publishes

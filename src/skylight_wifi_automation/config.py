@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import yaml
+from cryptography.x509 import load_pem_x509_certificate
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -14,6 +15,8 @@ class ChildConfig(BaseModel):
     skylight_profile: str
     object_name: str
     cutoff: time
+    # File-mode compatibility. Database mode migrates a true value into an
+    # override and does not store the flag. Old YAML that contains it still loads.
     manual_unblock: bool = False
 
     @field_validator("manual_unblock", mode="before")
@@ -60,9 +63,17 @@ class AppConfig(BaseModel):
     @field_validator("unifi_tls_ca")
     @classmethod
     def pem_certificate(cls, value: str) -> str:
-        if "-----BEGIN CERTIFICATE-----" not in value or "-----END CERTIFICATE-----" not in value:
+        cleaned = value.strip()
+        lowered = cleaned.casefold()
+        if "paste your console certificate" in lowered or "<paste" in lowered:
+            raise ValueError("unifi_tls_ca is a placeholder, not a certificate")
+        if "-----BEGIN CERTIFICATE-----" not in cleaned or "-----END CERTIFICATE-----" not in cleaned:
             raise ValueError("unifi_tls_ca must contain a PEM certificate")
-        return value
+        try:
+            load_pem_x509_certificate(cleaned.encode())
+        except Exception:  # noqa: BLE001 - parser errors must not include the certificate
+            raise ValueError("unifi_tls_ca is not a parseable X.509 certificate") from None
+        return cleaned
 
     @model_validator(mode="after")
     def unique_children(self) -> AppConfig:

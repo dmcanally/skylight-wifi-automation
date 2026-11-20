@@ -4,22 +4,138 @@ import argparse
 import asyncio
 import logging
 import os
+from datetime import UTC, datetime
+from pathlib import Path
 
+import uvicorn
+from argon2 import PasswordHasher
 from prometheus_client import start_http_server
 
 from . import __version__
-from .clients import SkylightClient
-from .config import load_config
+from .auth import dummy_password_hash
+from .config import AppConfig, load_config
 from .metrics import Metrics
+from .redact import REDACTOR
+from .runtime import (
+    Runtime,
+    close_clients,
+    config_source,
+    cookie_secure,
+    database_path,
+    ensure_secrets,
+    load_encryption_key,
+    setup_token,
+    ui_port,
+    utc_now,
+)
+from .secrets import ResolvedSecrets
 from .service import AutomationService
-from .unifi import UnifiClient
+from .store import Store
+from .web import AppContext, create_app
 
 
-def _secret(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable {name}")
-    return value
+async def production_factory(secrets: ResolvedSecrets, config: AppConfig) -> tuple[object, object]:
+    from .clients import SkylightClient
+    from .unifi import UnifiClient
+
+    skylight = SkylightClient(secrets.email, secrets.password)
+    if secrets.email and secrets.password:
+        try:
+            await skylight.__aenter__()
+        except Exception as exc:  # noqa: BLE001 - the client error may contain a secret
+            logging.getLogger(__name__).error(
+                "skylight client open failed error_type=%s", type(exc).__name__
+            )
+    unifi = UnifiClient(secrets.api_key, config.unifi_url, config.unifi_tls_ca, config.unifi_site)
+    return skylight, unifi
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=f"skylight-wifi {__version__}")
+    parser.add_argument("--config", default=os.environ.get("CONFIG_PATH", "/config/config.yaml"))
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("command", nargs="?", choices=["reset-admin"])
+    return parser.parse_args(argv)
+
+
+async def reset_admin() -> None:
+    store = Store(database_path(), load_encryption_key())
+    try:
+        removed = await store.delete_admin(datetime.now(UTC))
+    finally:
+        store.close()
+    if removed:
+        logging.getLogger(__name__).info("admin reset")
+    else:
+        logging.getLogger(__name__).info("admin reset found no admin")
+
+
+async def build_service(args: argparse.Namespace) -> tuple[Store, Runtime, AutomationService]:
+    key = load_encryption_key()
+    store = Store(database_path(), key)
+    source = config_source()
+    runtime = Runtime(store, source, Path(args.config), utc_now, production_factory, None, None)
+    if source == "db":
+        await runtime.import_if_needed()
+        config = await store.read_config()
+        await runtime.warn_if_drift()
+    else:
+        config = load_config(args.config)
+    secrets = await store.resolve_secrets()
+    ensure_secrets(secrets, key is not None)
+    runtime.config = config
+    runtime.secrets = secrets
+    skylight, unifi = await runtime.open_clients()
+    service = AutomationService(
+        config,
+        skylight,
+        unifi,
+        Metrics(),
+        clock=utc_now,
+        overrides=store if source == "db" else None,
+        reloader=runtime.reload_into,
+    )
+    return store, runtime, service
+
+
+async def async_main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.command == "reset-admin":
+        await reset_admin()
+        return
+    store, runtime, service = await build_service(args)
+    if args.once:
+        try:
+            await service.poll()
+        finally:
+            await close_clients(service.skylight, service.unifi)
+            store.close()
+        return
+    hasher = PasswordHasher()
+    app = create_app(
+        AppContext(
+            store=store,
+            service=service,
+            source=runtime.source,
+            clock=utc_now,
+            setup_token=setup_token(),
+            cookie_secure=cookie_secure(),
+            hasher=hasher,
+            dummy_hash=dummy_password_hash(hasher),
+            tester=None,
+            read_only=runtime.source == "file",
+        )
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=ui_port(),
+            access_log=False,
+            log_config=None,
+        )
+    )
+    await asyncio.gather(server.serve(), service.run_forever())
 
 
 def _silence_http_debug_logs() -> None:
@@ -28,37 +144,16 @@ def _silence_http_debug_logs() -> None:
     logging.getLogger("aiohttp.client").setLevel(logging.WARNING)
 
 
-async def async_main() -> None:
-    parser = argparse.ArgumentParser(description=f"skylight-wifi {__version__}")
-    parser.add_argument("--config", default=os.environ.get("CONFIG_PATH", "/config/config.yaml"))
-    parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
-
-    config = load_config(args.config)
-    unifi = UnifiClient(
-        _secret("UNIFI_API_KEY"),
-        config.unifi_url,
-        config.unifi_tls_ca,
-        config.unifi_site,
-    )
-    try:
-        async with SkylightClient(
-            _secret("SKYLIGHT_EMAIL"), _secret("SKYLIGHT_PASSWORD")
-        ) as skylight:
-            service = AutomationService(config, skylight, unifi, Metrics())
-            if args.once:
-                await service.poll()
-            else:
-                await service.run_forever()
-    finally:
-        await unifi.close()
-
-
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     _silence_http_debug_logs()
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    REDACTOR.install()
+    args = parse_args(argv)
+    if args.command == "reset-admin":
+        asyncio.run(reset_admin())
+        return
     start_http_server(8080)
-    asyncio.run(async_main())
+    asyncio.run(async_main(argv))
 
 
 if __name__ == "__main__":

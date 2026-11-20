@@ -23,9 +23,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     PATH="/app/.venv/bin:$PATH"
 
-RUN useradd --create-home --uid 10001 app
+# /data holds app.db. Mount a volume writable by uid 10001.
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /data \
+    && chown app:app /data
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 USER 10001
+VOLUME ["/data"]
 EXPOSE 8080
+EXPOSE 8000
 ENTRYPOINT ["skylight-wifi"]
