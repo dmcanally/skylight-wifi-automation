@@ -94,8 +94,9 @@ the window moves. Without remember me, the session lasts 12 hours and the
 cookie is a browser session cookie. Sessions shows created time, last seen,
 and a coarse browser label. A user can revoke their own. An admin can revoke
 anyone's. Changing a password revokes every session for that account and
-signs the browser that made the change into a new session. Disabling or
-deleting an account revokes all of its sessions.
+signs the browser that made the change into a new session. That new session
+keeps the original absolute cap, so a password change does not extend the 90
+days. Disabling or deleting an account revokes all of its sessions.
 
 Empty secret fields are left unchanged. Clear removes the database copy and
 the environment variable is used again. A value is shown only as set or not
@@ -137,11 +138,14 @@ skylight-wifi reset-admin
 ### Upgrading
 
 Back up `/data/app.db` before upgrading. Release 0.4.x migrates that database
-in place. 0.3.0 cannot read a migrated database. Before it migrates, the
-process writes one copy beside the database, `app.db.bak-<timestamp>`, mode
-`0600`, and keeps only the latest copy. To roll back, stop the new process,
-restore that backup over `app.db`, and start the 0.3.0 image. Pin the image
-by digest so a rollout cannot downgrade onto a migrated database.
+in place. 0.3.0 and 0.3.1 cannot read a migrated database. Before it migrates,
+the process writes one copy beside the database, `app.db.bak-<timestamp>`,
+mode `0600` from the moment the file is created, and keeps only the latest
+copy. Sessions that already exist keep their original 7-day lifetime, and
+their cookies stay 7-day cookies. To roll back, stop the pod first. Delete
+`app.db-wal` and `app.db-shm`, then copy the backup over `app.db`, and start
+the 0.3.1 image. Pin the image by digest so a rollout cannot downgrade onto
+a migrated database.
 
 ### Rotating the encryption key
 

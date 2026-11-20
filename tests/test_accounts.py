@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -11,6 +12,7 @@ from tests.uiutil import (
     ORIGIN,
     PASSWORD,
     SAME_SITE,
+    SETUP_TOKEN,
     USERNAME,
     build,
     csrf_from,
@@ -582,6 +584,7 @@ def test_usernames_are_case_insensitive(tmp_path):
             headers=ORIGIN,
         )
         assert again.status_code == 400
+        assert "already in use" in again.text
         client.post(
             "/logout",
             data={"csrf_token": csrf_from(client.get("/").text)},
@@ -611,6 +614,275 @@ def test_reset_admin_keeps_member_accounts(tmp_path, monkeypatch):
     assert names == {MEMBER}
     with TestClient(bundle.app) as client:
         assert client.get("/setup", follow_redirects=False).status_code == 200
+
+
+def _v1_database(path, created: datetime, token: str, *, last_seen: datetime) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version(version) VALUES (1);
+        CREATE TABLE admin (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT
+        );
+        CREATE TABLE sessions (
+            token_hash TEXT PRIMARY KEY,
+            csrf TEXT NOT NULL,
+            username TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        );
+        CREATE TABLE login_attempts (
+            id INTEGER PRIMARY KEY,
+            ip TEXT NOT NULL,
+            username TEXT NOT NULL,
+            attempted_at TEXT NOT NULL,
+            lock_kind TEXT,
+            locked_until TEXT
+        );
+        CREATE TABLE form_tokens (token_hash TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE children (
+            id INTEGER PRIMARY KEY,
+            label TEXT NOT NULL UNIQUE,
+            skylight_profile TEXT NOT NULL UNIQUE,
+            object_name TEXT NOT NULL UNIQUE,
+            cutoff TEXT NOT NULL
+        );
+        CREATE TABLE secrets (
+            name TEXT PRIMARY KEY,
+            nonce BLOB NOT NULL,
+            ciphertext BLOB NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE overrides (
+            id INTEGER PRIMARY KEY,
+            child_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            cleared_at TEXT,
+            cleared_by TEXT,
+            clear_reason TEXT
+        );
+        CREATE TABLE audit (
+            id INTEGER PRIMARY KEY,
+            ts TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT NOT NULL,
+            diff TEXT NOT NULL
+        );
+        CREATE TABLE config_version (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
+        );
+        INSERT INTO config_version(id, version) VALUES (1, 0);
+        """
+    )
+    connection.execute(
+        "INSERT INTO admin(username, password_hash, failed_count) VALUES ('Admin', '$argon2id$kept', 0)"
+    )
+    connection.execute(
+        """INSERT INTO sessions(token_hash, csrf, username, created_at, expires_at, last_seen)
+           VALUES (?, 'csrf-value', 'Admin', ?, ?, ?)""",
+        (
+            hash_token(token),
+            dump_dt(created),
+            dump_dt(created + timedelta(days=7)),
+            dump_dt(last_seen),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_v1_session_keeps_its_seven_day_lifetime(tmp_path):
+    moment = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    created = moment - timedelta(hours=20)
+    token = "legacy-session-token"
+    _v1_database(tmp_path / "app.db", created, token, last_seen=moment - timedelta(minutes=30))
+    previous = os.umask(0)
+    try:
+        bundle = build(tmp_path, moment=moment)
+    finally:
+        os.umask(previous)
+    path = bundle.store.path
+    backups = list(path.parent.glob("app.db.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].stat().st_mode & 0o777 == 0o600
+    row = db_rows(path, "SELECT legacy, cap_at FROM sessions")[0]
+    assert row["legacy"] == 1
+    assert row["cap_at"] == dump_dt(created)
+
+    def opened(client: TestClient):
+        client.cookies.clear()
+        return client.get(
+            "/",
+            headers={"cookie": f"{PLAIN_SESSION_COOKIE}={token}"},
+            follow_redirects=False,
+        )
+
+    with TestClient(bundle.app) as client:
+        first = opened(client)
+        assert first.status_code == 200
+        assert "set-cookie" not in {name.lower() for name in first.headers}
+        deadline = created + timedelta(days=7) - timedelta(minutes=1)
+        while bundle.clock.moment + timedelta(hours=11) < deadline:
+            bundle.clock.moment += timedelta(hours=11)
+            stepped = opened(client)
+            assert stepped.status_code == 200
+            assert "set-cookie" not in {name.lower() for name in stepped.headers}
+        bundle.clock.moment = deadline
+        assert opened(client).status_code == 200
+        bundle.clock.moment = created + timedelta(days=7) + timedelta(seconds=1)
+        assert opened(client).status_code == 303
+
+
+def test_migration_refuses_case_colliding_admin_names(tmp_path):
+    path = tmp_path / "app.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version(version) VALUES (1);
+        CREATE TABLE admin (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT
+        );
+        INSERT INTO admin(username, password_hash) VALUES ('Admin', '$argon2id$kept');
+        INSERT INTO admin(username, password_hash) VALUES ('admin', '$argon2id$other');
+        CREATE TABLE sessions (
+            token_hash TEXT PRIMARY KEY,
+            csrf TEXT NOT NULL,
+            username TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+    try:
+        Store(path, None)
+    except RuntimeError as exc:
+        assert "collide" in str(exc)
+    else:
+        raise AssertionError("migration should have refused the colliding names")
+    names = {row["username"] for row in db_rows(path, "SELECT username FROM admin")}
+    assert names == {"Admin", "admin"}
+    assert db_rows(path, "SELECT MAX(version) AS version FROM schema_version")[0]["version"] == 1
+    assert db_rows(path, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users'") == []
+
+
+def test_setup_rejects_a_case_colliding_username(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    bundle = build(tmp_path)
+    asyncio.run(
+        bundle.store.create_user("setup", bundle.clock(), "Casey", FAST.hash(MEMBER_PASSWORD), "member")
+    )
+    with TestClient(bundle.app) as client:
+        page = client.get("/setup")
+        posted = client.post(
+            "/setup",
+            data={
+                "csrf_token": csrf_from(page.text),
+                "setup_token": SETUP_TOKEN,
+                "username": "CASEY",
+                "password": PASSWORD,
+                "password2": PASSWORD,
+            },
+            headers=SAME_SITE,
+        )
+    assert posted.status_code == 400
+    assert "already in use" in posted.text
+    assert {row["username"] for row in db_rows(bundle.store.path, "SELECT username FROM users")} == {"Casey"}
+
+
+def test_password_change_keeps_the_original_absolute_cap(tmp_path):
+    start = datetime(2026, 1, 15, tzinfo=UTC)
+    bundle = build(tmp_path, moment=start)
+    new_password = "rotated-password"
+    with TestClient(bundle.app) as client:
+        sign_in(client)
+        client.cookies.clear()
+        page = client.get("/login")
+        signed = client.post(
+            "/login",
+            data={
+                "csrf_token": csrf_from(page.text),
+                "username": USERNAME,
+                "password": PASSWORD,
+                "remember": "1",
+            },
+            headers=SAME_SITE,
+            follow_redirects=False,
+        )
+        value = _cookie_value(signed.headers["set-cookie"])
+        for _days in (25, 25, 20):
+            bundle.clock.moment += timedelta(days=_days)
+            client.cookies.clear()
+            slid = client.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+                follow_redirects=False,
+            )
+            assert slid.status_code == 200
+        client.cookies.clear()
+        form = client.get("/password", headers={"cookie": f"{PLAIN_SESSION_COOKIE}={value}"})
+        changed = client.post(
+            "/password",
+            data={
+                "csrf_token": csrf_from(form.text),
+                "current_password": PASSWORD,
+                "new_password": new_password,
+                "password2": new_password,
+            },
+            headers={**ORIGIN, "cookie": f"{PLAIN_SESSION_COOKIE}={value}"},
+            follow_redirects=False,
+        )
+        assert changed.status_code == 303
+        fresh = changed.headers["set-cookie"]
+        new_value = _cookie_value(fresh)
+        assert new_value != value
+        assert "max-age=1728000" in fresh.lower()
+        client.cookies.clear()
+        assert (
+            client.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={new_value}"},
+                follow_redirects=False,
+            ).status_code
+            == 200
+        )
+        bundle.clock.moment = start + timedelta(days=89)
+        client.cookies.clear()
+        assert (
+            client.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={new_value}"},
+                follow_redirects=False,
+            ).status_code
+            == 200
+        )
+        bundle.clock.moment = start + timedelta(days=90, seconds=1)
+        client.cookies.clear()
+        assert (
+            client.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={new_value}"},
+                follow_redirects=False,
+            ).status_code
+            == 303
+        )
 
 
 def test_rejection_log_cannot_be_split_by_a_newline(tmp_path, caplog):

@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import stat
 import threading
@@ -53,12 +52,23 @@ IDLE_TIMEOUT = timedelta(hours=12)
 SHORT_SESSION = timedelta(hours=12)
 REMEMBER_SESSION = timedelta(days=30)
 REMEMBER_MAX = timedelta(days=90)
+LEGACY_SESSION = timedelta(days=7)
 TOUCH_AFTER = timedelta(minutes=15)
 SCHEMA_VERSION = 2
 
 
 def username_key(value: str) -> str:
     return value.strip().casefold()
+
+
+def cookie_max_age(remember: bool, now: datetime, cap_at: datetime | None = None) -> int | None:
+    """Max-Age for a remember-me cookie, clipped so it cannot outlive the absolute cap."""
+    if not remember:
+        return None
+    moment = now.astimezone(UTC)
+    anchor = (cap_at or moment).astimezone(UTC)
+    deadline = min(moment + REMEMBER_SESSION, anchor + REMEMBER_MAX)
+    return max(0, int((deadline - moment).total_seconds()))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -83,7 +93,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     remember INTEGER NOT NULL DEFAULT 0,
-    user_agent TEXT NOT NULL DEFAULT ''
+    user_agent TEXT NOT NULL DEFAULT '',
+    legacy INTEGER NOT NULL DEFAULT 0,
+    cap_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS login_attempts (
     id INTEGER PRIMARY KEY,
@@ -343,12 +355,34 @@ class Store:
                     raise
 
     def _backup_database(self) -> None:
-        """Keep one pre-migration copy of app.db, mode 0600, next to the live file."""
-        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        """Keep one pre-migration copy of app.db, created mode 0600, next to the live file."""
+        checkpoint = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint is None or int(checkpoint[0]) != 0:
+            raise RuntimeError("database checkpoint failed; refusing to migrate without a backup")
         stamp = self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
         dest = self.path.parent / f"{self.path.name}.bak-{stamp}"
-        shutil.copyfile(self.path, dest)
-        os.chmod(dest, stat.S_IRUSR | stat.S_IWUSR)
+        if dest.exists():
+            dest.unlink()
+        previous = os.umask(0o077)
+        try:
+            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            os.close(fd)
+            target = sqlite3.connect(dest)
+            try:
+                self._conn.backup(target)
+            finally:
+                target.close()
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{dest}{suffix}")
+                if sidecar.exists():
+                    sidecar.unlink()
+            if dest.stat().st_mode & 0o777 != 0o600:
+                raise RuntimeError("migration backup was not created with mode 0600")
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
+        finally:
+            os.umask(previous)
         for old in self.path.parent.glob(f"{self.path.name}.bak-*"):
             if old != dest:
                 old.unlink()
@@ -382,7 +416,9 @@ class Store:
             for row in rows:
                 key = username_key(str(row["username"]))
                 if not key or key in seen:
-                    continue
+                    raise RuntimeError(
+                        "migration refused: admin usernames collide when case is ignored"
+                    )
                 seen.add(key)
                 conn.execute(
                     """INSERT OR IGNORE INTO users(
@@ -417,6 +453,13 @@ class Store:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS sessions_public_id ON sessions(public_id)"
         )
+        session_columns = self._column_names(conn, "sessions")
+        if "legacy" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0")
+        if "cap_at" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN cap_at TEXT NOT NULL DEFAULT ''")
+        # v1 sessions lived 7 days from creation and their cookies already have that Max-Age.
+        conn.execute("UPDATE sessions SET legacy = 1, cap_at = created_at")
         conn.execute("INSERT INTO schema_version(version) VALUES (2)")
 
     @contextmanager
@@ -548,13 +591,18 @@ class Store:
         with self._tx() as conn:
             if conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is not None:
                 raise ConfigWriteError(["An admin already exists."])
-            conn.execute(
-                """INSERT INTO users(
-                       username, username_key, password_hash, role, disabled, created_at,
-                       failed_count, locked_until
-                   ) VALUES (?, ?, ?, 'admin', 0, ?, 0, NULL)""",
-                (username, username_key(username), password_hash, dump_dt(now)),
-            )
+            if self._find_user(conn, username) is not None:
+                raise ConfigWriteError(["That username is already in use."])
+            try:
+                conn.execute(
+                    """INSERT INTO users(
+                           username, username_key, password_hash, role, disabled, created_at,
+                           failed_count, locked_until
+                       ) VALUES (?, ?, ?, 'admin', 0, ?, 0, NULL)""",
+                    (username, username_key(username), password_hash, dump_dt(now)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigWriteError(["That username is already in use."]) from exc
             self._audit(conn, username, "setup", username, {}, now)
 
     def _create_user(
@@ -565,13 +613,16 @@ class Store:
         with self._tx() as conn:
             if self._find_user(conn, username) is not None:
                 raise ConfigWriteError(["That username is already in use."])
-            conn.execute(
-                """INSERT INTO users(
-                       username, username_key, password_hash, role, disabled, created_at,
-                       failed_count, locked_until
-                   ) VALUES (?, ?, ?, ?, 0, ?, 0, NULL)""",
-                (username, username_key(username), password_hash, role, dump_dt(now)),
-            )
+            try:
+                conn.execute(
+                    """INSERT INTO users(
+                           username, username_key, password_hash, role, disabled, created_at,
+                           failed_count, locked_until
+                       ) VALUES (?, ?, ?, ?, 0, ?, 0, NULL)""",
+                    (username, username_key(username), password_hash, role, dump_dt(now)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigWriteError(["That username is already in use."]) from exc
             self._audit(conn, actor, "user_created", username, {"role": role}, now)
 
     def _set_role(self, username: str, role: str, actor: str, now: datetime) -> None:
@@ -753,43 +804,66 @@ class Store:
         )
 
     def _create_session(
-        self, username: str, now: datetime, remember: bool = False, user_agent: str = ""
+        self,
+        username: str,
+        now: datetime,
+        remember: bool = False,
+        user_agent: str = "",
+        cap_at: datetime | None = None,
     ) -> tuple[str, str]:
         token = new_token()
         csrf = new_token()
+        moment = now.astimezone(UTC)
+        anchor = (cap_at or moment).astimezone(UTC)
         lifetime = REMEMBER_SESSION if remember else SHORT_SESSION
+        cap = anchor + (REMEMBER_MAX if remember else SHORT_SESSION)
+        expires = min(moment + lifetime, cap)
         with self._tx() as conn:
             self._prune_sessions(conn, now)
             conn.execute(
                 """INSERT INTO sessions(
                        token_hash, public_id, csrf, username, created_at, expires_at, last_seen,
-                       remember, user_agent
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       remember, user_agent, legacy, cap_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
                 (
                     hash_token(token),
                     new_token(),
                     csrf,
                     username,
-                    dump_dt(now),
-                    dump_dt(now + lifetime),
-                    dump_dt(now),
+                    dump_dt(moment),
+                    dump_dt(expires),
+                    dump_dt(moment),
                     1 if remember else 0,
                     str(user_agent or "")[:80],
+                    dump_dt(anchor),
                 ),
             )
         return token, csrf
 
-    def _session_hints(self, token: str) -> tuple[bool, str]:
+    def _session_hints(self, token: str) -> tuple[bool, str, datetime | None]:
+        """Remember flag, user agent, and the earliest absolute-cap anchor for that choice."""
         if not token:
-            return False, ""
+            return False, "", None
         with self._lock:
             row = self._conn.execute(
-                "SELECT remember, user_agent FROM sessions WHERE token_hash = ?",
+                """SELECT remember, user_agent, username, cap_at, created_at
+                   FROM sessions WHERE token_hash = ?""",
                 (hash_token(token),),
             ).fetchone()
-        if row is None:
-            return False, ""
-        return bool(row["remember"]), str(row["user_agent"] or "")
+            if row is None:
+                return False, "", None
+            remember = bool(row["remember"])
+            others = self._conn.execute(
+                """SELECT cap_at, created_at FROM sessions
+                   WHERE username = ? AND remember = ?""",
+                (row["username"], 1 if remember else 0),
+            ).fetchall()
+        anchors = [
+            load_dt(item["cap_at"]) if item["cap_at"] else load_dt(item["created_at"])
+            for item in others
+        ]
+        own = load_dt(row["cap_at"]) if row["cap_at"] else load_dt(row["created_at"])
+        return remember, str(row["user_agent"] or ""), min(anchors) if anchors else own
 
     def _use_session(self, token: str, now: datetime) -> Session | None:
         if not token:
@@ -808,7 +882,15 @@ class Store:
             seen = load_dt(row["last_seen"])
             created = load_dt(row["created_at"])
             remember = bool(row["remember"])
-            cap = created + (REMEMBER_MAX if remember else SHORT_SESSION)
+            legacy = bool(row["legacy"])
+            anchor = load_dt(row["cap_at"]) if row["cap_at"] else created
+            if legacy:
+                # v1 measured 7 days from creation and did not refresh the cookie.
+                cap = anchor + LEGACY_SESSION
+            elif remember:
+                cap = anchor + REMEMBER_MAX
+            else:
+                cap = anchor + SHORT_SESSION
             idle_hit = (not remember) and moment - seen >= IDLE_TIMEOUT
             if (
                 account is None

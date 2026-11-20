@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
@@ -41,7 +41,7 @@ from .overrides import ConfirmationRequired, OverrideError, override_expiry
 from .runtime import test_connections
 from .secrets import SECRET_NAMES
 from .security import constant_equal
-from .store import SETUP_LOCK_SUBJECT, ConfigWriteError, LastAdminError, Store
+from .store import SETUP_LOCK_SUBJECT, ConfigWriteError, LastAdminError, Store, cookie_max_age
 
 LOGGER = logging.getLogger(__name__)
 
@@ -663,8 +663,7 @@ async def login(request: Request) -> Response:
     )
     await context.store.add_audit(result.username, "login", result.username, {"result": "ok"}, now)
     response = RedirectResponse("/", status_code=303)
-    max_age = int(timedelta(days=30).total_seconds()) if remember else None
-    session_cookie(response, token, context.cookie_secure, max_age)
+    session_cookie(response, token, context.cookie_secure, cookie_max_age(remember, now))
     return response
 
 
@@ -711,7 +710,17 @@ async def setup(request: Request) -> Response:
     try:
         password_hash = await hash_password_off_loop(context.hasher, password)
         await context.store.create_admin(username, password_hash, now)
-    except ConfigWriteError:
+    except ConfigWriteError as exc:
+        if any("already in use" in item for item in exc.errors):
+            token = await context.store.create_form_token(now)
+            return render(
+                request,
+                "setup.html",
+                title="Setup",
+                csrf=token,
+                errors=exc.errors,
+                status_code=400,
+            )
         return PlainTextResponse("Not found.", status_code=404)
     response = RedirectResponse("/login?created=1", status_code=303)
     return response
@@ -1191,12 +1200,12 @@ async def password(request: Request) -> Response:
     if errors:
         return render(request, "password.html", title="Password", errors=errors, status_code=400)
     new_hash = await hash_password_off_loop(context.hasher, new_password)
-    remember, agent = await context.store.session_hints(user.token)
+    remember, agent, anchor = await context.store.session_hints(user.token)
     await context.store.set_password(user.username, new_hash, now)
-    token, _csrf = await context.store.create_session(user.username, now, remember, agent)
+    kept = anchor if remember else None
+    token, _csrf = await context.store.create_session(user.username, now, remember, agent, kept)
     response = RedirectResponse("/password?saved=1", status_code=303)
-    max_age = int(timedelta(days=30).total_seconds()) if remember else None
-    session_cookie(response, token, context.cookie_secure, max_age)
+    session_cookie(response, token, context.cookie_secure, cookie_max_age(remember, now, kept))
     return response
 
 
@@ -1334,15 +1343,19 @@ async def _change_user(request: Request, action: str) -> Response:
                 return await users_page(request, errors=errors, status_code=400)
             password_hash = await hash_password_off_loop(context.hasher, new_password)
             self_reset = user is not None and user.username.casefold() == username.casefold()
-            remember, agent = (False, "")
+            remember, agent, anchor = False, "", None
             if self_reset and user is not None:
-                remember, agent = await context.store.session_hints(user.token)
+                remember, agent, anchor = await context.store.session_hints(user.token)
             await context.store.reset_password(actor, username, password_hash, now)
             if self_reset and user is not None:
-                token, _csrf = await context.store.create_session(user.username, now, remember, agent)
+                kept = anchor if remember else None
+                token, _csrf = await context.store.create_session(
+                    user.username, now, remember, agent, kept
+                )
                 response = RedirectResponse("/users?saved=1", status_code=303)
-                max_age = int(timedelta(days=30).total_seconds()) if remember else None
-                session_cookie(response, token, context.cookie_secure, max_age)
+                session_cookie(
+                    response, token, context.cookie_secure, cookie_max_age(remember, now, kept)
+                )
                 return response
     except LastAdminError as exc:
         return await users_page(request, errors=[str(exc)], status_code=400)
