@@ -70,7 +70,7 @@ async def rotate_key() -> None:
     replacement = load_named_key("APP_ENCRYPTION_KEY_NEW")
     if current is None or replacement is None:
         raise RuntimeError("APP_ENCRYPTION_KEY and APP_ENCRYPTION_KEY_NEW must both be set")
-    store = Store(database_path(), current)
+    store = Store(database_path(), current, utc_now)
     try:
         count = await store.rotate_key(replacement)
     finally:
@@ -79,7 +79,7 @@ async def rotate_key() -> None:
 
 
 async def reset_admin() -> None:
-    store = Store(database_path(), load_encryption_key())
+    store = Store(database_path(), load_encryption_key(), utc_now)
     try:
         removed = await store.delete_admin(datetime.now(UTC))
     finally:
@@ -92,7 +92,7 @@ async def reset_admin() -> None:
 
 async def build_service(args: argparse.Namespace) -> tuple[Store, Runtime, AutomationService]:
     key = load_encryption_key()
-    store = Store(database_path(), key)
+    store = Store(database_path(), key, utc_now)
     source = config_source()
     runtime = Runtime(store, source, Path(args.config), utc_now, production_factory, None, None)
     if source == "db":

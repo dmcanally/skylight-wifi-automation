@@ -88,11 +88,14 @@ demoted. Sign-in lockout stays per account and per client address.
 
 Sessions live in the SQLite file on `DATA_DIR`, so a pod restart keeps them.
 The cookie value is stored only as a hash. Remember me keeps a session for 30
-days and renews that window on use. Without it, the session lasts 12 hours.
-Sessions shows created time, last seen, and a coarse browser label. A user
-can revoke their own. An admin can revoke anyone's. Changing a password
-revokes that account's other sessions. Disabling or deleting an account
-revokes all of its sessions.
+days, renewed on use, and never past 90 days from when it was created. The
+browser cookie for that choice has a 30-day Max-Age and is sent again when
+the window moves. Without remember me, the session lasts 12 hours and the
+cookie is a browser session cookie. Sessions shows created time, last seen,
+and a coarse browser label. A user can revoke their own. An admin can revoke
+anyone's. Changing a password revokes every session for that account and
+signs the browser that made the change into a new session. Disabling or
+deleting an account revokes all of its sessions.
 
 Empty secret fields are left unchanged. Clear removes the database copy and
 the environment variable is used again. A value is shown only as set or not
@@ -123,12 +126,22 @@ sending the header.
 Liveness and readiness probes should use `GET :8000/healthz`. The image
 health check uses that URL. Prometheus stays on `:8080/metrics`.
 
-`skylight-wifi reset-admin` deletes the admin and its sessions so `/setup`
-can be used again. From a shell in the container:
+`skylight-wifi reset-admin` deletes admin accounts and their sessions so
+`/setup` can create an admin again. Member accounts and their sessions stay.
+From a shell in the container:
 
 ```bash
 skylight-wifi reset-admin
 ```
+
+### Upgrading
+
+Back up `/data/app.db` before upgrading. Release 0.4.x migrates that database
+in place. 0.3.0 cannot read a migrated database. Before it migrates, the
+process writes one copy beside the database, `app.db.bak-<timestamp>`, mode
+`0600`, and keeps only the latest copy. To roll back, stop the new process,
+restore that backup over `app.db`, and start the 0.3.0 image. Pin the image
+by digest so a rollout cannot downgrade onto a migrated database.
 
 ### Rotating the encryption key
 

@@ -199,6 +199,18 @@ def admin_only(request: Request) -> HTMLResponse | None:
     )
 
 
+def _log_text(value: str) -> str:
+    """One log token. Control characters are percent-encoded so they cannot break the line."""
+    parts: list[str] = []
+    for char in value:
+        code = ord(char)
+        if code < 32 or code == 127:
+            parts.append(f"%{code:02X}")
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
 def _log_rejection(request: Request, check: str) -> None:
     raw_fetch = request.headers.get("sec-fetch-site")
     if raw_fetch is None:
@@ -208,9 +220,9 @@ def _log_rejection(request: Request, check: str) -> None:
         fetch_site = value if value in _FETCH_SITE_VALUES else "other"
     LOGGER.warning(
         "rejected state-changing request check=%s method=%s path=%s origin_present=%s sec_fetch_site=%s",
-        check,
-        request.method,
-        request.url.path,
+        _log_text(check),
+        _log_text(request.method),
+        _log_text(request.url.path),
         "yes" if request.headers.get("origin") is not None else "no",
         fetch_site,
     )
@@ -341,14 +353,17 @@ def render(request: Request, name: str, status_code: int = 200, **extra: object)
     return HTMLResponse(html, status_code=status_code)
 
 
-def session_cookie(response: Response, token: str, secure: bool) -> None:
+def session_cookie(
+    response: Response, token: str, secure: bool, max_age: int | None = None
+) -> None:
+    """Set the session cookie. ``max_age`` None is a browser session cookie, with no Max-Age."""
     name = session_cookie_name(secure)
     if name.startswith("__Host-") and not secure:
         raise RuntimeError("refusing to set a prefixed cookie without Secure")
     response.set_cookie(
         name,
         token,
-        max_age=int(timedelta(days=7).total_seconds()),
+        max_age=max_age,
         httponly=True,
         secure=secure,
         samesite="strict",
@@ -506,6 +521,8 @@ async def load_user(request: Request) -> Visitor | None:
     session = await context.store.use_session(token, context.clock())
     if session is None:
         return None
+    if session.refresh_cookie:
+        request.scope["skylight_cookie_refresh"] = (token, session.cookie_max_age)
     return Visitor(session.username, session.csrf, token, session.role)
 
 
@@ -532,6 +549,19 @@ class SecurityGate:
                 headers["Referrer-Policy"] = "same-origin"
                 if not str(scope.get("path", "")).startswith("/static/"):
                     headers["Cache-Control"] = "no-store"
+                refresh = scope.get("skylight_cookie_refresh")
+                if isinstance(refresh, tuple) and isinstance(refresh[1], int):
+                    context: AppContext = request.app.state.context
+                    name = session_cookie_name(context.cookie_secure)
+                    prefix = f"{name}=".lower().encode()
+                    already = any(
+                        key.lower() == b"set-cookie" and value.lower().startswith(prefix)
+                        for key, value in message["headers"]
+                    )
+                    if not already:
+                        temp = Response()
+                        session_cookie(temp, str(refresh[0]), context.cookie_secure, refresh[1])
+                        headers.append("set-cookie", temp.headers["set-cookie"])
             await send(message)  # type: ignore[operator]
 
         request = Request(scope, receive)  # type: ignore[arg-type]
@@ -622,6 +652,9 @@ async def login(request: Request) -> Response:
         await context.store.add_audit(result.username, action, result.username, {"result": action}, now)
         return await login_page(request, error="Sign-in failed.")
     remember = str(form.get("remember") or "") == "1"
+    previous = request.cookies.get(session_cookie_name(context.cookie_secure), "")
+    if previous:
+        await context.store.delete_session(previous)
     token, _csrf = await context.store.create_session(
         result.username,
         now,
@@ -630,7 +663,8 @@ async def login(request: Request) -> Response:
     )
     await context.store.add_audit(result.username, "login", result.username, {"result": "ok"}, now)
     response = RedirectResponse("/", status_code=303)
-    session_cookie(response, token, context.cookie_secure)
+    max_age = int(timedelta(days=30).total_seconds()) if remember else None
+    session_cookie(response, token, context.cookie_secure, max_age)
     return response
 
 
@@ -1157,8 +1191,13 @@ async def password(request: Request) -> Response:
     if errors:
         return render(request, "password.html", title="Password", errors=errors, status_code=400)
     new_hash = await hash_password_off_loop(context.hasher, new_password)
-    await context.store.set_password(user.username, new_hash, now, user.token)
-    return RedirectResponse("/password?saved=1", status_code=303)
+    remember, agent = await context.store.session_hints(user.token)
+    await context.store.set_password(user.username, new_hash, now)
+    token, _csrf = await context.store.create_session(user.username, now, remember, agent)
+    response = RedirectResponse("/password?saved=1", status_code=303)
+    max_age = int(timedelta(days=30).total_seconds()) if remember else None
+    session_cookie(response, token, context.cookie_secure, max_age)
+    return response
 
 
 @dataclass
@@ -1294,8 +1333,17 @@ async def _change_user(request: Request, action: str) -> Response:
             if errors:
                 return await users_page(request, errors=errors, status_code=400)
             password_hash = await hash_password_off_loop(context.hasher, new_password)
-            keep = user.token if user is not None and user.username == username else ""
-            await context.store.reset_password(actor, username, password_hash, now, keep)
+            self_reset = user is not None and user.username.casefold() == username.casefold()
+            remember, agent = (False, "")
+            if self_reset and user is not None:
+                remember, agent = await context.store.session_hints(user.token)
+            await context.store.reset_password(actor, username, password_hash, now)
+            if self_reset and user is not None:
+                token, _csrf = await context.store.create_session(user.username, now, remember, agent)
+                response = RedirectResponse("/users?saved=1", status_code=303)
+                max_age = int(timedelta(days=30).total_seconds()) if remember else None
+                session_cookie(response, token, context.cookie_secure, max_age)
+                return response
     except LastAdminError as exc:
         return await users_page(request, errors=[str(exc)], status_code=400)
     except ConfigWriteError as exc:
@@ -1350,7 +1398,7 @@ async def revoke_session(request: Request) -> Response:
     user = current_user(request)
     if user is None:
         return unauthorized(request.method)
-    session_id = int(request.path_params["session_id"])
+    session_id = str(request.path_params["session_id"])
     try:
         await context.store.revoke_session(
             session_id,
@@ -1358,14 +1406,6 @@ async def revoke_session(request: Request) -> Response:
             context.clock(),
             username=user.username,
             admin=user.role == "admin",
-        )
-    except PermissionError:
-        return render(
-            request,
-            "blocked.html",
-            title="Not allowed",
-            message="You do not have access to that page.",
-            status_code=403,
         )
     except KeyError:
         return PlainTextResponse("Not found.", status_code=404)
@@ -1420,7 +1460,7 @@ def create_app(context: AppContext) -> Starlette:
         Route("/users/{username}/delete", post_guard(delete_user_account), methods=["POST"]),
         Route("/users/{username}/password", post_guard(reset_user_password), methods=["POST"]),
         Route("/sessions", post_guard(sessions), methods=["GET"]),
-        Route("/sessions/{session_id:int}/revoke", post_guard(revoke_session), methods=["POST"]),
+        Route("/sessions/{session_id}/revoke", post_guard(revoke_session), methods=["POST"]),
         Route("/overrides/{child_id:int}", post_guard(set_override), methods=["POST"]),
         Route("/overrides/{child_id:int}/clear", post_guard(clear_override), methods=["POST"]),
         Mount("/static", app=StaticFiles(directory=_PACKAGE / "static"), name="static"),
