@@ -30,7 +30,7 @@ FAST = PasswordHasher(time_cost=1, memory_cost=64, parallelism=1)
 USERNAME = "admin"
 PASSWORD = "long-enough-pw"
 ORIGIN = {"origin": "http://testserver"}
-SETUP_TOKEN = "setup-token-value"
+SETUP_TOKEN = "setup-token-value-0123456789abcdef"
 
 
 class Clock:

@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import time
 
+import pytest
 from starlette.testclient import TestClient
 from tests.conftest import chicago
 from tests.uiutil import ORIGIN, build, csrf_from, db_rows, poll, sign_in
@@ -146,3 +147,54 @@ def test_file_mode_is_read_only_and_keeps_manual_unblock(tmp_path):
 def test_database_uses_wal(tmp_path):
     bundle = build(tmp_path)
     assert asyncio.run(bundle.store.journal_mode()) == "wal"
+
+
+def test_database_files_are_private(tmp_path):
+    from pathlib import Path
+
+    store_path = tmp_path / "app.db"
+    bundle = build(tmp_path)
+    assert store_path.stat().st_mode & 0o777 == 0o600
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
+    for suffix in ("-wal", "-shm"):
+        extra = Path(f"{store_path}{suffix}")
+        if extra.exists():
+            assert extra.stat().st_mode & 0o777 == 0o600
+    del bundle
+
+
+def test_missing_or_unusable_data_dir_is_one_line(tmp_path, monkeypatch):
+    from skylight_wifi_automation.runtime import database_path
+    from skylight_wifi_automation.store import Store
+
+    missing = tmp_path / "missing"
+    monkeypatch.setenv("DATA_DIR", str(missing))
+    with pytest.raises(RuntimeError, match=r"^DATA_DIR is not writable: .+$") as missing_error:
+        database_path()
+    assert "\n" not in str(missing_error.value)
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("x", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"^DATA_DIR is not writable:"):
+        Store(blocked / "app.db", None)
+
+
+def test_unknown_timezone_is_a_form_error(tmp_path):
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        token = sign_in(client)
+        response = client.post(
+            "/settings",
+            data={
+                "csrf_token": token,
+                "timezone": "Not/AZone",
+                "poll_seconds": "60",
+                "dry_run": "false",
+                "include_late": "true",
+                "include_routines": "true",
+                "empty_day_unlocks": "false",
+            },
+            headers=ORIGIN,
+        )
+    assert response.status_code == 400
+    assert "timezone" in response.text
+    assert bundle.service.config.timezone == "America/Chicago"

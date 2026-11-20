@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -28,7 +29,12 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__
-from .auth import LoginResult, attempt_login, hash_password, verify_password
+from .auth import (
+    LoginResult,
+    attempt_login,
+    hash_password_off_loop,
+    verify_password_off_loop,
+)
 from .config import AppConfig
 from .evaluator import past_cutoff
 from .overrides import ConfirmationRequired, OverrideError, override_expiry
@@ -39,7 +45,8 @@ from .store import ConfigWriteError, Store
 
 LOGGER = logging.getLogger(__name__)
 
-SESSION_COOKIE = "__Host-swa_session"
+HOST_SESSION_COOKIE = "__Host-swa_session"
+PLAIN_SESSION_COOKIE = "swa_session"
 _USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _CUTOFF = re.compile(r"\d{2}:\d{2}")
 _TEST_TOKENS = {"ok", "skylight_error", "unifi_error", "not_configured"}
@@ -65,6 +72,7 @@ class AppContext:
     dummy_hash: str
     tester: Callable[..., Awaitable[str]] | None
     read_only: bool
+    trusted_proxies: str = ""
 
 
 @dataclass
@@ -113,10 +121,61 @@ def same_origin(request: Request) -> bool:
     return parsed.scheme in {"http", "https"} and parsed.netloc == host
 
 
+def session_cookie_name(secure: bool) -> str:
+    if secure:
+        return HOST_SESSION_COOKIE
+    return PLAIN_SESSION_COOKIE
+
+
+def _proxy_trusts(host: str, spec: str) -> bool:
+    if not spec.strip() or not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    for item in spec.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            if "/" in token:
+                if address in ipaddress.ip_network(token, strict=False):
+                    return True
+            elif address == ipaddress.ip_address(token):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _forwarded_client(header: str, spec: str) -> str | None:
+    hops = [part.strip() for part in header.split(",") if part.strip()]
+    if not hops:
+        return None
+    for hop in reversed(hops):
+        host = hop.rsplit("%", 1)[0]
+        if host.startswith("[") and "]" in host:
+            host = host[1 : host.index("]")]
+        elif host.count(":") == 1 and "." in host:
+            host = host.split(":", 1)[0]
+        if not _proxy_trusts(host, spec):
+            return host[:64]
+    return hops[0][:64]
+
+
 def client_ip(request: Request) -> str:
-    if request.client is None or not request.client.host:
+    peer = ""
+    if request.client is not None and request.client.host:
+        peer = request.client.host
+    context: AppContext = request.app.state.context
+    if peer and _proxy_trusts(peer, context.trusted_proxies):
+        forwarded = _forwarded_client(request.headers.get("x-forwarded-for", ""), context.trusted_proxies)
+        if forwarded:
+            return forwarded
+    if not peer:
         return "unknown"
-    return request.client.host[:64]
+    return peer[:64]
 
 
 def field_errors(exc: ValidationError) -> list[str]:
@@ -186,8 +245,11 @@ def render(request: Request, name: str, status_code: int = 200, **extra: object)
 
 
 def session_cookie(response: Response, token: str, secure: bool) -> None:
+    name = session_cookie_name(secure)
+    if name.startswith("__Host-") and not secure:
+        raise RuntimeError("refusing to set a prefixed cookie without Secure")
     response.set_cookie(
-        SESSION_COOKIE,
+        name,
         token,
         max_age=int(timedelta(days=7).total_seconds()),
         httponly=True,
@@ -199,7 +261,11 @@ def session_cookie(response: Response, token: str, secure: bool) -> None:
 
 def clear_session_cookie(response: Response, secure: bool) -> None:
     response.delete_cookie(
-        SESSION_COOKIE, path="/", secure=secure, httponly=True, samesite="strict"
+        session_cookie_name(secure),
+        path="/",
+        secure=secure,
+        httponly=True,
+        samesite="strict",
     )
 
 
@@ -236,7 +302,7 @@ def post_guard(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[R
 
 async def load_user(request: Request) -> Visitor | None:
     context: AppContext = request.app.state.context
-    token = request.cookies.get(SESSION_COOKIE, "")
+    token = request.cookies.get(session_cookie_name(context.cookie_secure), "")
     session = await context.store.use_session(token, context.clock())
     if session is None:
         return None
@@ -350,9 +416,10 @@ async def setup(request: Request) -> Response:
     context: AppContext = request.app.state.context
     if await context.store.get_admin() is not None:
         return PlainTextResponse("Not found.", status_code=404)
-    if context.setup_token is None:
+    if context.setup_token is None or len(context.setup_token) < 32:
         return render(request, "setup_disabled.html", title="Setup")
     now = context.clock()
+    ip = client_ip(request)
     if request.method == "GET":
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token)
@@ -363,7 +430,13 @@ async def setup(request: Request) -> Response:
     username = str(form.get("username") or "").strip()
     password = str(form.get("password") or "")
     confirm = str(form.get("password2") or "")
+    if await context.store.login_is_locked("setup", ip, now):
+        await verify_password_off_loop(context.hasher, context.dummy_hash, password or "x")
+        await context.store.add_audit(username or "unknown", "setup_failure", username or "unknown", {}, now)
+        token = await context.store.create_form_token(now)
+        return render(request, "setup.html", title="Setup", csrf=token, errors=["Setup failed."])
     if not constant_equal(supplied, context.setup_token):
+        await context.store.record_failure("setup", ip, now)
         await context.store.add_audit(username or "unknown", "setup_failure", username or "unknown", {}, now)
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token, errors=["Setup failed."])
@@ -380,7 +453,8 @@ async def setup(request: Request) -> Response:
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token, errors=errors, status_code=400)
     try:
-        await context.store.create_admin(username, hash_password(context.hasher, password), now)
+        password_hash = await hash_password_off_loop(context.hasher, password)
+        await context.store.create_admin(username, password_hash, now)
     except ConfigWriteError:
         return PlainTextResponse("Not found.", status_code=404)
     response = RedirectResponse("/login?created=1", status_code=303)
@@ -801,9 +875,16 @@ async def password(request: Request) -> Response:
     confirm = str(form.get("password2") or "")
     now = context.clock()
     admin = await context.store.get_admin()
-    if admin is None or admin.username != user.username or not verify_password(
-        context.hasher, admin.password_hash, current
-    ):
+    ip = client_ip(request)
+    locked = await context.store.login_is_locked(user.username, ip, now)
+    current_ok = False
+    if admin is not None and admin.username == user.username and not locked:
+        current_ok = await verify_password_off_loop(context.hasher, admin.password_hash, current)
+    else:
+        await verify_password_off_loop(context.hasher, context.dummy_hash, current or "x")
+    if not current_ok:
+        if not locked:
+            await context.store.record_failure(user.username, ip, now)
         await context.store.add_audit(user.username, "password_change_failed", user.username, {}, now)
         return render(
             request,
@@ -820,7 +901,8 @@ async def password(request: Request) -> Response:
         errors.append("Passwords do not match.")
     if errors:
         return render(request, "password.html", title="Password", errors=errors, status_code=400)
-    await context.store.set_password(user.username, hash_password(context.hasher, new_password), now)
+    new_hash = await hash_password_off_loop(context.hasher, new_password)
+    await context.store.set_password(user.username, new_hash, now)
     await context.store.delete_user_sessions(user.username)
     token, _csrf = await context.store.create_session(user.username, now)
     response = RedirectResponse("/password?saved=1", status_code=303)

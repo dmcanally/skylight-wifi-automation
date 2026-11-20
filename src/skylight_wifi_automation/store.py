@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -194,6 +195,20 @@ class AuditPage:
     total: int
 
 
+def _require_writable_dir(directory: Path) -> None:
+    if not directory.exists() or not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
+        raise RuntimeError(f"DATA_DIR is not writable: {directory}")
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        raise RuntimeError(f"DATA_DIR is not writable: {directory}") from None
+
+
+def _private_mode(path: Path) -> None:
+    if path.exists():
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+
 class Store:
     """SQLite in WAL mode. Public methods run the work via asyncio.to_thread."""
 
@@ -201,14 +216,29 @@ class Store:
         self.path = path
         self._key = key
         self.encryption_enabled = key is not None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=5)
+        _require_writable_dir(path.parent)
+        previous = os.umask(0o077)
+        try:
+            try:
+                self._conn = sqlite3.connect(
+                    path, check_same_thread=False, isolation_level=None, timeout=5
+                )
+            except sqlite3.OperationalError:
+                raise RuntimeError(f"DATA_DIR is not writable: {path.parent}") from None
+        finally:
+            os.umask(previous)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._migrate()
+        self._restrict_files()
 
     def __repr__(self) -> str:
         return f"Store(path={str(self.path)!r})"
+
+    def _restrict_files(self) -> None:
+        _private_mode(self.path)
+        for suffix in ("-wal", "-shm"):
+            _private_mode(Path(f"{self.path}{suffix}"))
 
     def close(self) -> None:
         with self._lock:
@@ -219,6 +249,7 @@ class Store:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA busy_timeout=5000")
+            self._restrict_files()
             current = 0
             exists = self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
@@ -762,11 +793,13 @@ class Store:
         note = ""
         if row is not None and self._key is not None:
             try:
-                value = decrypt(self._key, row["nonce"], row["ciphertext"])
+                value, legacy = decrypt(self._key, row["nonce"], row["ciphertext"], name)
             except Exception:  # noqa: BLE001 - decrypt failures must not include the secret
                 LOGGER.warning("secret decrypt failed name=%s", name)
                 note = "The stored value could not be read."
             else:
+                if legacy:
+                    self._rewrite_secret(conn, name, value)
                 REDACTOR.update([value])
                 return value, "db", row["updated_at"], ""
         elif row is not None:
@@ -775,6 +808,40 @@ class Store:
             REDACTOR.update([env])
             return env, "env", None, note
         return None, "missing", None, note
+
+    def _rewrite_secret(self, conn: sqlite3.Connection, name: str, plaintext: str) -> None:
+        if self._key is None:
+            return
+        nonce, ciphertext = encrypt(self._key, plaintext, name)
+        conn.execute(
+            "UPDATE secrets SET nonce = ?, ciphertext = ? WHERE name = ?",
+            (nonce, ciphertext, name),
+        )
+        LOGGER.info("secret migrated to authenticated encryption name=%s", name)
+
+    def _rotate_key(self, new_key: bytes) -> int:
+        if self._key is None:
+            raise RuntimeError("APP_ENCRYPTION_KEY is not set")
+        if len(new_key) != 32:
+            raise RuntimeError("APP_ENCRYPTION_KEY_NEW must be base64-encoded 32 bytes")
+        with self._tx() as conn:
+            rows = conn.execute("SELECT name, nonce, ciphertext FROM secrets").fetchall()
+            rewritten: list[tuple[str, bytes, bytes]] = []
+            for row in rows:
+                try:
+                    value, _legacy = decrypt(self._key, row["nonce"], row["ciphertext"], row["name"])
+                except Exception:  # noqa: BLE001 - do not include the secret in the error
+                    raise RuntimeError(f"secret could not be rotated name={row['name']}") from None
+                REDACTOR.update([value])
+                nonce, ciphertext = encrypt(new_key, value, row["name"])
+                rewritten.append((row["name"], nonce, ciphertext))
+            for name, nonce, ciphertext in rewritten:
+                conn.execute(
+                    "UPDATE secrets SET nonce = ?, ciphertext = ? WHERE name = ?",
+                    (nonce, ciphertext, name),
+                )
+        self._key = new_key
+        return len(rewritten)
 
     def _secret_statuses(self) -> list[SecretStatus]:
         with self._lock:
@@ -812,7 +879,7 @@ class Store:
         if not self.encryption_enabled or self._key is None:
             raise ConfigWriteError(["Secret storage is disabled."])
         REDACTOR.update([plaintext])
-        nonce, ciphertext = encrypt(self._key, plaintext)
+        nonce, ciphertext = encrypt(self._key, plaintext, name)
         with self._tx() as conn:
             conn.execute(
                 """INSERT INTO secrets(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?)
@@ -845,7 +912,8 @@ class Store:
                 return False
             if self._key is not None:
                 try:
-                    REDACTOR.update([decrypt(self._key, row["nonce"], row["ciphertext"])])
+                    value, _legacy = decrypt(self._key, row["nonce"], row["ciphertext"], name)
+                    REDACTOR.update([value])
                 except Exception:  # noqa: BLE001 - decrypt failures must not include the secret
                     LOGGER.warning("secret decrypt failed name=%s", name)
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1148,6 +1216,7 @@ _ASYNC_METHODS = (
     "_secret_statuses",
     "_set_secret",
     "_clear_secret",
+    "_rotate_key",
     "_resolve_secrets",
     "_set_override",
     "_clear_override",

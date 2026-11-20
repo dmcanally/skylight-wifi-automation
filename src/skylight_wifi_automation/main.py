@@ -24,7 +24,9 @@ from .runtime import (
     database_path,
     ensure_secrets,
     load_encryption_key,
+    load_named_key,
     setup_token,
+    trusted_proxies,
     ui_port,
     utc_now,
 )
@@ -54,8 +56,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"skylight-wifi {__version__}")
     parser.add_argument("--config", default=os.environ.get("CONFIG_PATH", "/config/config.yaml"))
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("command", nargs="?", choices=["reset-admin"])
+    parser.add_argument("command", nargs="?", choices=["reset-admin", "rotate-key"])
     return parser.parse_args(argv)
+
+
+def _fail(exc: RuntimeError) -> None:
+    logging.getLogger(__name__).error("%s", exc)
+    raise SystemExit(1) from None
+
+
+async def rotate_key() -> None:
+    current = load_encryption_key()
+    replacement = load_named_key("APP_ENCRYPTION_KEY_NEW")
+    if current is None or replacement is None:
+        raise RuntimeError("APP_ENCRYPTION_KEY and APP_ENCRYPTION_KEY_NEW must both be set")
+    store = Store(database_path(), current)
+    try:
+        count = await store.rotate_key(replacement)
+    finally:
+        store.close()
+    logging.getLogger(__name__).info("rotated %s secret(s)", count)
 
 
 async def reset_admin() -> None:
@@ -100,9 +120,19 @@ async def build_service(args: argparse.Namespace) -> tuple[Store, Runtime, Autom
 
 async def async_main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    if args.command == "reset-admin":
-        await reset_admin()
-        return
+    try:
+        if args.command == "reset-admin":
+            await reset_admin()
+            return
+        if args.command == "rotate-key":
+            await rotate_key()
+            return
+        await _serve(args)
+    except RuntimeError as exc:
+        _fail(exc)
+
+
+async def _serve(args: argparse.Namespace) -> None:
     store, runtime, service = await build_service(args)
     if args.once:
         try:
@@ -124,8 +154,10 @@ async def async_main(argv: list[str] | None = None) -> None:
             dummy_hash=dummy_password_hash(hasher),
             tester=None,
             read_only=runtime.source == "file",
+            trusted_proxies=trusted_proxies(),
         )
     )
+    proxies = trusted_proxies()
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -133,6 +165,8 @@ async def async_main(argv: list[str] | None = None) -> None:
             port=ui_port(),
             access_log=False,
             log_config=None,
+            proxy_headers=True,
+            forwarded_allow_ips=proxies,
         )
     )
     await asyncio.gather(server.serve(), service.run_forever())
@@ -150,7 +184,16 @@ def main(argv: list[str] | None = None) -> None:
     REDACTOR.install()
     args = parse_args(argv)
     if args.command == "reset-admin":
-        asyncio.run(reset_admin())
+        try:
+            asyncio.run(reset_admin())
+        except RuntimeError as exc:
+            _fail(exc)
+        return
+    if args.command == "rotate-key":
+        try:
+            asyncio.run(rotate_key())
+        except RuntimeError as exc:
+            _fail(exc)
         return
     start_http_server(8080)
     asyncio.run(async_main(argv))

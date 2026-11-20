@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import time
 from pathlib import Path
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from cryptography.x509 import load_pem_x509_certificate
@@ -42,7 +42,10 @@ class AppConfig(BaseModel):
     @field_validator("timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
-        ZoneInfo(value)
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("timezone is not a known timezone") from None
         return value
 
     @field_validator("unifi_site", mode="before")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -30,6 +32,36 @@ def dummy_password_hash(hasher: PasswordHasher) -> str:
     return hasher.hash("skylight-wifi-dummy-password")
 
 
+def argon2_concurrency() -> int:
+    raw = os.environ.get("ARGON2_CONCURRENCY", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return min(32, max(1, value))
+
+
+def _hasher_limit() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    limit = getattr(loop, "_swa_argon2_limit", None)
+    if limit is None:
+        limit = asyncio.Semaphore(argon2_concurrency())
+        loop._swa_argon2_limit = limit  # type: ignore[attr-defined]
+    return limit
+
+
+async def hash_password_off_loop(hasher: PasswordHasher, password: str) -> str:
+    async with _hasher_limit():
+        return await asyncio.to_thread(hash_password, hasher, password)
+
+
+async def verify_password_off_loop(
+    hasher: PasswordHasher, password_hash: str, password: str
+) -> bool:
+    async with _hasher_limit():
+        return await asyncio.to_thread(verify_password, hasher, password_hash, password)
+
+
 async def attempt_login(
     store: Any,
     hasher: PasswordHasher,
@@ -39,18 +71,18 @@ async def attempt_login(
     ip: str,
     now: datetime,
 ) -> LoginResult:
-    """Check a password. The password is never returned or logged."""
+    """Check a password. Hashing runs off the poller loop. The password is never logged."""
     safe_name = (username or "").strip()[:64] or "unknown"
     safe_ip = (ip or "unknown")[:64]
     if await store.login_is_locked(safe_name, safe_ip, now):
-        verify_password(hasher, dummy_hash, password or "x")
+        await verify_password_off_loop(hasher, dummy_hash, password or "x")
         return LoginResult(False, True, safe_name)
     admin = await store.get_admin()
     if admin is not None and admin.username == safe_name and password:
-        ok = verify_password(hasher, admin.password_hash, password)
+        ok = await verify_password_off_loop(hasher, admin.password_hash, password)
         canonical = admin.username
     else:
-        verify_password(hasher, dummy_hash, password or "x")
+        await verify_password_off_loop(hasher, dummy_hash, password or "x")
         ok = False
         canonical = safe_name
     if ok:

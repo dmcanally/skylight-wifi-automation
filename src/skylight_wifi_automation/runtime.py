@@ -25,10 +25,8 @@ ClientFactory = Callable[[ResolvedSecrets, AppConfig], Awaitable[tuple[object, o
 
 def database_path() -> Path:
     directory = Path(os.environ.get("DATA_DIR", "/data"))
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        raise RuntimeError(f"DATA_DIR is not writable: {directory}") from None
+    if not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
+        raise RuntimeError(f"DATA_DIR is not writable: {directory}")
     return directory / "app.db"
 
 
@@ -58,20 +56,32 @@ def setup_token() -> str | None:
     raw = os.environ.get("ADMIN_SETUP_TOKEN")
     if raw is None or raw.strip() == "":
         return None
-    return raw.strip()
+    token = raw.strip()
+    if len(token) < 32:
+        LOGGER.error("ADMIN_SETUP_TOKEN must be at least 32 characters; setup is disabled")
+        return None
+    return token
 
 
-def load_encryption_key() -> bytes | None:
-    raw = os.environ.get("APP_ENCRYPTION_KEY")
+def trusted_proxies() -> str:
+    return os.environ.get("TRUSTED_PROXIES", "").strip()
+
+
+def load_named_key(name: str) -> bytes | None:
+    raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return None
     try:
         key = base64.b64decode(raw.strip(), validate=True)
     except (binascii.Error, ValueError):
-        raise RuntimeError("APP_ENCRYPTION_KEY must be base64-encoded 32 bytes") from None
+        raise RuntimeError(f"{name} must be base64-encoded 32 bytes") from None
     if len(key) != 32:
-        raise RuntimeError("APP_ENCRYPTION_KEY must be base64-encoded 32 bytes")
+        raise RuntimeError(f"{name} must be base64-encoded 32 bytes")
     return key
+
+
+def load_encryption_key() -> bytes | None:
+    return load_named_key("APP_ENCRYPTION_KEY")
 
 
 def config_fingerprint(config: AppConfig) -> str:

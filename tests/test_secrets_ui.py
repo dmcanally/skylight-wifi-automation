@@ -11,6 +11,7 @@ from tests.uiutil import ORIGIN, build, csrf_from, db_rows, login, sign_in
 from skylight_wifi_automation.clients import SkylightClient
 from skylight_wifi_automation.redact import REDACTOR
 from skylight_wifi_automation.secrets import decrypt, encrypt
+from skylight_wifi_automation.store import Store
 from skylight_wifi_automation.unifi import UnifiClient
 
 SECRET = "skylight-secret-value"
@@ -30,10 +31,12 @@ def _pages(client: TestClient) -> str:
 def test_secret_round_trip_and_wrong_key():
     key = b"a" * 32
     other = b"b" * 32
-    nonce, ciphertext = encrypt(key, SECRET)
-    assert decrypt(key, nonce, ciphertext) == SECRET
+    nonce, ciphertext = encrypt(key, SECRET, "UNIFI_API_KEY")
+    value, legacy = decrypt(key, nonce, ciphertext, "UNIFI_API_KEY")
+    assert value == SECRET
+    assert legacy is False
     with pytest.raises(InvalidTag):
-        decrypt(other, nonce, ciphertext)
+        decrypt(other, nonce, ciphertext, "UNIFI_API_KEY")
 
 
 def test_values_stay_out_of_pages_logs_audit_and_errors(tmp_path, caplog, monkeypatch):
@@ -148,6 +151,71 @@ def test_missing_encryption_key_disables_the_secrets_form(tmp_path, monkeypatch)
     assert "env-api-key-value" not in page.text
     assert posted.status_code == 403
     assert "db-api-key-value" not in posted.text
+
+
+def test_legacy_secret_is_rewritten_with_associated_data(tmp_path, monkeypatch):
+    import os
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    monkeypatch.delenv("UNIFI_API_KEY", raising=False)
+    monkeypatch.delenv("SKYLIGHT_EMAIL", raising=False)
+    monkeypatch.delenv("SKYLIGHT_PASSWORD", raising=False)
+    key = b"c" * 32
+    store = Store(tmp_path / "app.db", key)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(key).encrypt(nonce, b"legacy-secret-value", None)
+
+    def insert() -> None:
+        with store._lock:
+            store._conn.execute(
+                "INSERT INTO secrets(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?)",
+                ("UNIFI_API_KEY", nonce, ciphertext, "2026-08-24T00:00:00+00:00"),
+            )
+
+    insert()
+
+    async def read() -> str:
+        resolved = await store.resolve_secrets()
+        return resolved.api_key
+
+    assert asyncio.run(read()) == "legacy-secret-value"
+    row = db_rows(store.path, "SELECT nonce, ciphertext FROM secrets")[0]
+    value, legacy = decrypt(key, row["nonce"], row["ciphertext"], "UNIFI_API_KEY")
+    assert legacy is False
+    assert value == "legacy-secret-value"
+    with pytest.raises(InvalidTag):
+        AESGCM(key).decrypt(row["nonce"], row["ciphertext"], None)
+
+
+def test_rotate_key_rewrites_secrets_without_printing_them(tmp_path, monkeypatch, caplog):
+    import base64
+    from datetime import UTC, datetime
+
+    from skylight_wifi_automation.main import rotate_key
+
+    monkeypatch.delenv("UNIFI_API_KEY", raising=False)
+    key = b"e" * 32
+    new_key = b"f" * 32
+    store = Store(tmp_path / "app.db", key)
+
+    async def save() -> None:
+        await store.set_secret("UNIFI_API_KEY", "rotated-secret-value", "cli", datetime.now(UTC))
+
+    asyncio.run(save())
+    store.close()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ENCRYPTION_KEY", base64.b64encode(key).decode())
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_NEW", base64.b64encode(new_key).decode())
+    asyncio.run(rotate_key())
+    assert "rotated-secret-value" not in caplog.text
+    opened = Store(tmp_path / "app.db", new_key)
+
+    async def read() -> str:
+        return (await opened.resolve_secrets()).api_key
+
+    assert asyncio.run(read()) == "rotated-secret-value"
+    opened.close()
 
 
 def test_client_repr_hides_credentials():

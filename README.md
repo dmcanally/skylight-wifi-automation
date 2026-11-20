@@ -30,8 +30,11 @@ environment variables:
 | `DATA_DIR` | SQLite directory. Default `/data`. Mount a volume writable by uid 10001 |
 | `UI_PORT` | Web UI port. Default `8000` |
 | `APP_ENCRYPTION_KEY` | Base64 of 32 bytes. Required to store secrets in the database |
-| `ADMIN_SETUP_TOKEN` | Required to create the first admin. Unset disables setup |
-| `COOKIE_SECURE` | `false` disables the Secure cookie flag for plain HTTP. Default is Secure |
+| `ADMIN_SETUP_TOKEN` | At least 32 characters. Required to create the first admin. Unset or shorter disables setup |
+| `COOKIE_SECURE` | `false` uses a plain HTTP session cookie. Default is Secure |
+| `TRUSTED_PROXIES` | Comma-separated proxy IPs or CIDRs allowed to set `X-Forwarded-For`. Empty by default |
+| `ARGON2_CONCURRENCY` | How many password hashes may run at once. Default `2` |
+| `APP_ENCRYPTION_KEY_NEW` | Replacement key for `skylight-wifi rotate-key` |
 | `LATCH_PATH` | Daily latch file. Default `/tmp/skylight-wifi-latch.json` |
 
 Metrics are served on port `8080`. The UI is served on port `8000`. The
@@ -69,9 +72,12 @@ overrides.
    bytes if secrets should be stored in the database. If it is unset, the
    secrets page is disabled and `SKYLIGHT_EMAIL`, `SKYLIGHT_PASSWORD`, and
    `UNIFI_API_KEY` are used.
-3. Set `ADMIN_SETUP_TOKEN` to a long random value. There is no default password.
-4. Open `http://<lan-host>:8000/setup`, create an admin, and use a password
-   of at least 12 characters.
+3. Set `ADMIN_SETUP_TOKEN` to a random value of at least 32 characters. A
+   shorter value is ignored and setup stays disabled. There is no default
+   password.
+4. Set `COOKIE_SECURE=false` when the UI is plain HTTP. Open
+   `http://<lan-host>:8000/setup`, create an admin, and use a password of at
+   least 12 characters.
 5. Unset `ADMIN_SETUP_TOKEN` and sign in.
 
 Empty secret fields are left unchanged. Clear removes the database copy and
@@ -79,9 +85,27 @@ the environment variable is used again. A value is shown only as set or not
 set, with its source (`db` or `env`) and, for a database value, when it was
 updated.
 
-`COOKIE_SECURE=false` turns off the Secure flag for plain HTTP on a LAN.
-Leave it unset when the UI is served over HTTPS. The session cookie is
-`__Host-swa_session` (HttpOnly, SameSite=Strict, Path=/).
+`COOKIE_SECURE=false` is for plain HTTP on a LAN, including the
+`http://<lan-host>:8000/setup` flow. The session cookie is then `swa_session`
+without a `__Host-` prefix, because browsers reject a `__Host-` cookie that
+is not Secure. Leave `COOKIE_SECURE` unset on HTTPS. The cookie is then
+`__Host-swa_session` with Secure, Path=/, and no Domain. Both names are
+HttpOnly and SameSite=Strict.
+
+`DATA_DIR` must already exist and be writable by uid 10001. If it is missing
+or not writable, startup logs one line, `DATA_DIR is not writable: ...`, and
+exits. The database file and its WAL and SHM files are mode `0600`. The
+directory is mode `0700`.
+
+`TRUSTED_PROXIES` is empty unless you set it. The process only reads
+`X-Forwarded-For` when the connecting peer is in that list (an IP or a CIDR),
+and uvicorn is given the same list as `forwarded_allow_ips`. A lockout is per
+address, so failures from one client do not lock a different address. Do not
+put every client in the list. An untrusted peer cannot choose its address by
+sending the header.
+
+Liveness and readiness probes should use `GET :8000/healthz`. The image
+health check uses that URL. Prometheus stays on `:8080/metrics`.
 
 `skylight-wifi reset-admin` deletes the admin and its sessions so `/setup`
 can be used again. From a shell in the container:
@@ -89,6 +113,23 @@ can be used again. From a shell in the container:
 ```bash
 skylight-wifi reset-admin
 ```
+
+### Rotating the encryption key
+
+Database secrets are AES-256-GCM ciphertext bound to the secret name. A row
+written by an older build, without that binding, is re-encrypted on the next
+read. Changing `APP_ENCRYPTION_KEY` without rewriting the rows makes those
+rows unreadable. The process then falls back to the environment variable.
+
+To rotate the key without retyping the secrets:
+
+1. Keep the current key in `APP_ENCRYPTION_KEY`.
+2. Put the new 32-byte key, base64-encoded, in `APP_ENCRYPTION_KEY_NEW`.
+3. Run `skylight-wifi rotate-key`.
+4. Move the new key to `APP_ENCRYPTION_KEY`, unset `APP_ENCRYPTION_KEY_NEW`,
+   and restart.
+
+The command rewrites every stored secret and does not print the values.
 
 ### Schedule overrides
 
@@ -108,6 +149,11 @@ that would have been logged.
 In file mode, `manual_unblock: true` still unlocks that child until cutoff.
 In database mode the field is imported once as an unblock override and is
 not stored on the child. Old YAML that still contains the field loads.
+
+An active manual unblock still unblocks that child when Skylight is
+unreachable. The operator's override wins over the fail-closed hold. A
+manual block still blocks. If there is no active override, a Skylight outage
+leaves the object unchanged until cutoff.
 
 ## Rules
 
