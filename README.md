@@ -81,6 +81,19 @@ overrides.
    still works directly, and it returns 404 once the admin exists.
 5. Unset `ADMIN_SETUP_TOKEN` and sign in.
 
+An admin can add members and other admins from Users. A member can view the
+dashboard and set block or unblock overrides. Members cannot open secrets,
+users, or the schedule. The last active admin cannot be removed, disabled, or
+demoted. Sign-in lockout stays per account and per client address.
+
+Sessions live in the SQLite file on `DATA_DIR`, so a pod restart keeps them.
+The cookie value is stored only as a hash. Remember me keeps a session for 30
+days and renews that window on use. Without it, the session lasts 12 hours.
+Sessions shows created time, last seen, and a coarse browser label. A user
+can revoke their own. An admin can revoke anyone's. Changing a password
+revokes that account's other sessions. Disabling or deleting an account
+revokes all of its sessions.
+
 Empty secret fields are left unchanged. Clear removes the database copy and
 the environment variable is used again. A value is shown only as set or not
 set, with its source (`db` or `env`) and, for a database value, when it was

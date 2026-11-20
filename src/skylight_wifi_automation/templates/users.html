@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="page-head">
+  <div>
+    <h1>Users</h1>
+    <p class="lede">Admins manage the schedule and secrets. Members can view status and block or unblock.</p>
+  </div>
+</header>
+<div class="stack">
+  {% for row in rows %}
+  <article class="card">
+    <div class="card-head">
+      <div>
+        <h2>{{ row.username }}</h2>
+        <p class="meta">{% if row.disabled %}Disabled{% else %}Active{% endif %}</p>
+      </div>
+      <div class="pills">
+        {% if row.role == "admin" %}
+        <span class="pill">Admin</span>
+        {% else %}
+        <span class="pill pill-ok">Member</span>
+        {% endif %}
+        {% if row.disabled %}<span class="pill pill-bad">Disabled</span>{% endif %}
+      </div>
+    </div>
+    <form method="post" action="/users/{{ row.username }}/role">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label for="role-{{ row.username }}">Role</label>
+      <select id="role-{{ row.username }}" name="role">
+        <option value="admin" {% if row.role == "admin" %}selected{% endif %}>admin</option>
+        <option value="member" {% if row.role == "member" %}selected{% endif %}>member</option>
+      </select>
+      <button type="submit">Save role</button>
+    </form>
+    <form method="post" action="/users/{{ row.username }}/password">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <div class="grid">
+        <div>
+          <label for="new-{{ row.username }}">New password</label>
+          <input id="new-{{ row.username }}" name="new_password" type="password" autocomplete="new-password">
+        </div>
+        <div>
+          <label for="again-{{ row.username }}">New password again</label>
+          <input id="again-{{ row.username }}" name="password2" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <button type="submit" class="btn-quiet">Reset password</button>
+    </form>
+    <div class="actions">
+      {% if row.disabled %}
+      <form method="post" action="/users/{{ row.username }}/enable">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button type="submit">Enable</button>
+      </form>
+      {% else %}
+      <form method="post" action="/users/{{ row.username }}/disable">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button type="submit" class="btn-quiet">Disable</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/users/{{ row.username }}/delete">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button type="submit" class="btn-quiet">Remove</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+<article class="card">
+  <h2>Add a user</h2>
+  <form method="post" action="/users">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="grid">
+      <div>
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="off">
+      </div>
+      <div>
+        <label for="role">Role</label>
+        <select id="role" name="role">
+          <option value="member">member</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      <div>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password">
+      </div>
+      <div>
+        <label for="password2">Password again</label>
+        <input id="password2" name="password2" type="password" autocomplete="new-password">
+      </div>
+    </div>
+    <button type="submit">Add user</button>
+  </form>
+</article>
+{% endblock %}

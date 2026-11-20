@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="page-head">
+  <div>
+    <h1>Sessions</h1>
+    <p class="lede">These are the browsers that are still signed in. Revoking one signs that browser out.</p>
+  </div>
+</header>
+{% if rows %}
+<div class="stack">
+  {% for row in rows %}
+  <article class="card"{% if row.current %} data-current="yes"{% endif %}>
+    <div class="card-head">
+      <div>
+        <h2>{{ row.agent }}</h2>
+        <p class="meta">{{ row.username }}</p>
+      </div>
+      <div class="pills">
+        {% if row.current %}<span class="pill pill-ok">This browser</span>{% endif %}
+        {% if row.remember %}<span class="pill">30 days</span>{% else %}<span class="pill">12 hours</span>{% endif %}
+      </div>
+    </div>
+    <dl class="facts">
+      <div><dt>Created</dt><dd>{{ row.created_text }}</dd></div>
+      <div><dt>Last seen</dt><dd>{{ row.seen_text }}</dd></div>
+    </dl>
+    <form method="post" action="/sessions/{{ row.id }}/revoke">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button type="submit" class="btn-quiet">Revoke</button>
+    </form>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p class="meta">No sessions.</p>
+{% endif %}
+{% endblock %}

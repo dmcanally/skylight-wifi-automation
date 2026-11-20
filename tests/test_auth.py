@@ -38,7 +38,7 @@ def test_setup_is_disabled_without_a_token(tmp_path):
     assert "ADMIN_SETUP_TOKEN" in page.text
     assert "no default password" in page.text.lower()
     assert posted.status_code == 200
-    assert db_rows(bundle.store.path, "SELECT username FROM admin") == []
+    assert db_rows(bundle.store.path, "SELECT username FROM users") == []
 
 
 def test_setup_rejects_a_bad_token_and_a_short_password(tmp_path):
@@ -73,7 +73,7 @@ def test_setup_rejects_a_bad_token_and_a_short_password(tmp_path):
     assert "wrong-token-value" not in bad.text
     assert PASSWORD not in bad.text
     assert short.status_code == 400
-    assert db_rows(bundle.store.path, "SELECT username FROM admin") == []
+    assert db_rows(bundle.store.path, "SELECT username FROM users") == []
     audit = " ".join(row["diff"] + row["action"] for row in db_rows(bundle.store.path, "SELECT * FROM audit"))
     assert PASSWORD not in audit
     assert "wrong-token-value" not in audit
@@ -86,7 +86,7 @@ def test_setup_creates_one_admin_then_returns_404(tmp_path):
         assert created.status_code == 303
         assert client.get("/setup").status_code == 404
         assert client.post("/setup", data={"setup_token": SETUP_TOKEN}, headers=ORIGIN).status_code == 404
-    rows = db_rows(bundle.store.path, "SELECT password_hash FROM admin")
+    rows = db_rows(bundle.store.path, "SELECT password_hash FROM users")
     assert len(rows) == 1
     assert rows[0]["password_hash"].startswith("$argon2id$")
 
@@ -231,11 +231,12 @@ def test_session_idle_and_absolute_expiry(tmp_path):
         assert client.get("/", follow_redirects=False).status_code == 303
 
 
-def test_password_change_rotates_the_session(tmp_path):
+def test_password_change_revokes_other_sessions(tmp_path):
     bundle = build(tmp_path)
     new_password = "newer-password-value"
-    with TestClient(bundle.app) as client:
+    with TestClient(bundle.app) as client, TestClient(bundle.app) as other:
         token = sign_in(client)
+        assert login(other).status_code == 303
         old_cookie = client.cookies.get(PLAIN_SESSION_COOKIE)
         changed = client.post(
             "/password",
@@ -249,10 +250,9 @@ def test_password_change_rotates_the_session(tmp_path):
             follow_redirects=False,
         )
         assert changed.status_code == 303
-        assert client.cookies.get(PLAIN_SESSION_COOKIE) != old_cookie
-        client.cookies.clear()
-        client.cookies.set(PLAIN_SESSION_COOKIE, old_cookie)
-        assert client.get("/", follow_redirects=False).status_code == 303
+        assert client.cookies.get(PLAIN_SESSION_COOKIE) == old_cookie
+        assert client.get("/", follow_redirects=False).status_code == 200
+        assert other.get("/", follow_redirects=False).status_code == 303
         assert login(client, password=PASSWORD).status_code == 200
         assert login(client, password=new_password).status_code == 303
     audit = " ".join(row["diff"] for row in db_rows(bundle.store.path, "SELECT diff FROM audit"))
@@ -294,7 +294,7 @@ def test_reset_admin_cli_allows_setup_again(tmp_path, monkeypatch):
         page = client.get("/setup")
     assert page.status_code == 200
     assert "Create the admin" in page.text
-    assert db_rows(bundle.store.path, "SELECT username FROM admin") == []
+    assert db_rows(bundle.store.path, "SELECT username FROM users") == []
     assert db_rows(bundle.store.path, "SELECT token_hash FROM sessions") == []
 
 
@@ -315,7 +315,7 @@ def test_short_setup_token_disables_setup(tmp_path, caplog, monkeypatch):
         )
     assert "32 characters" in page.text
     assert posted.status_code == 200
-    assert db_rows(bundle.store.path, "SELECT username FROM admin") == []
+    assert db_rows(bundle.store.path, "SELECT username FROM users") == []
 
 
 def test_setup_failures_use_the_login_lockout(tmp_path):
@@ -351,7 +351,7 @@ def test_setup_failures_use_the_login_lockout(tmp_path):
         )
         assert locked.status_code == 200
         assert "Setup failed." in locked.text
-        assert db_rows(bundle.store.path, "SELECT username FROM admin") == []
+        assert db_rows(bundle.store.path, "SELECT username FROM users") == []
         bundle.clock.moment += timedelta(minutes=15, seconds=1)
         page = client.get("/setup")
         opened = client.post(
