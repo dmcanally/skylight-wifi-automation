@@ -44,7 +44,7 @@ class SkylightClient:
         }
         # GET /chores/all is an open-work view: completed occurrences disappear,
         # so a finished day looks like no chores. The date-range list includes them.
-        # `day` is the household-local date (America/Chicago in this deployment).
+        # `day` is the local date in the configured timezone.
         groups = await self._client.get_all_chores(frame_id)
         dated = await self._client.get_chores(frame_id, after=day, before=day)
         today = day.isoformat()

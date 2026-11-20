@@ -10,42 +10,25 @@ empty_day_unlocks: false
 unifi_url: "https://unifi.local/proxy/network/integration/v1"
 # Optional site UUID, internalReference, or name. Omit on a one-site gateway.
 # unifi_site:
-# Public console certificate. Not a secret. Re-pin before 2028-09-19 or after
-# a firmware reset that regenerates the certificate.
+# Placeholder only. Paste the gateway console certificate. Not a secret.
+# Re-pin before it expires or after a firmware reset that regenerates it.
 unifi_tls_ca: |
   -----BEGIN CERTIFICATE-----
-  MIIDNTCCAh2gAwIBAgIJaab4/nMoO9vRMA0GCSqGSIb3DQEBCwUAMBYxFDASBgNV
-  BAMTC3VuaWZpLmxvY2FsMB4XDTI2MDYxNzE3NTk1MFoXDTI4MDkxOTE3NTk1MFow
-  FjEUMBIGA1UEAxMLdW5pZmkubG9jYWwwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
-  ggEKAoIBAQC6RRjb0Ic1U1GZN++BL4RfSFGsifPTVJXxA4z5tubwgPbooUgzNfOt
-  3v0JMY1Tiy6vSPAkuHRDBQkiXmcvwrtM1dKgGsPa+yytniGHE6FiVFESSE6a0qvy
-  7jgE0k8gv34U192nbphVLHGaHhzjiYCyJ5EK2bqxbu7JtgwODfDJAHhCmNFbDOc+
-  RhwNcKjuGJb2rM1/OhESNuWc6haP+5Nc7aDq4PR4DimtI1uEri4R2bnQc+kNILRM
-  eqksJ4/z42MOP/rl2zsSWEE9EY6oycEztnU0R3SIP0ktKiGo22LlirlbCCP2WwQm
-  NwSns4v2K3otq5oX+GA6pcHuktMybjO9AgMBAAGjgYUwgYIwCwYDVR0PBAQDAgL0
-  MDEGA1UdJQQqMCgGCCsGAQUFBwMBBggrBgEFBQcDAgYIKwYBBQUHAwMGCCsGAQUF
-  BwMIMEAGA1UdEQQ5MDeCC3VuaWZpLmxvY2Fsgglsb2NhbGhvc3SCBVs6OjFdhwR/
-  AAABhxD+gAAAAAAAAAAAAAAAAAABMA0GCSqGSIb3DQEBCwUAA4IBAQBOyvRnz0zt
-  rt9lIzxU9arfK1y9416uMh1/ywJQDcux4YCmg6r2GZIUFqHhf6o+uPPq0kxNn+IX
-  ttCehLnlPHUa1OVdxG5OElN+MgqeDM93Q12kSRuuvExPf7MsZJqeqPXzTDLX+6aM
-  eFTfnsBZuU5seLuT+osZWUDh3wbh+0huiOILJORP/3LZPFPtAUyx7wcClD6Pock2
-  LiUAslCBewNwpYAB01nNgX8YVzy1mQwimd67NMXBKsyCs0US04CmRNOmY9hax/4L
-  cj4quTgmlvSGNwZkzsVW7mcF43jK85ejMWmhTcgjWVSGmfIk0+97hR5U6mc1FmZw
-  DBqFSSKDZx4c
+  <paste your console certificate>
   -----END CERTIFICATE-----
 children:
-  - name: Lanie
-    skylight_profile: Lanie
-    object_name: "No Internet - Lanie"
+  - name: child-a
+    skylight_profile: Child A
+    object_name: "No Internet - child-a"
     cutoff: "20:30"
     manual_unblock: false
-  - name: Libby
-    skylight_profile: Libby
-    object_name: "No Internet - Libby"
+  - name: child-b
+    skylight_profile: Child B
+    object_name: "No Internet - child-b"
     cutoff: "20:30"
     manual_unblock: false
-  - name: Tucker
-    skylight_profile: Tucker
-    object_name: "No Internet - Tucker"
+  - name: child-c
+    skylight_profile: Child C
+    object_name: "No Internet - child-c"
     cutoff: "20:00"
     manual_unblock: false

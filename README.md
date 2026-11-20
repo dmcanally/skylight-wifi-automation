@@ -1,36 +1,48 @@
 # Skylight Wi-Fi Automation
 
-Private household service. Lanie, Libby, and Tucker stay blocked until that
-child's Skylight tasks and chores for the day are complete. Access is for the
-rest of the America/Chicago day, then the cutoff locks them again.
+Pauses a UniFi Object Manager block once a child's Skylight tasks and chores
+for the day are complete. Access lasts for the rest of the configured local
+day, then the cutoff locks that child again.
 
 The switch is the UniFi Object Manager object `No Internet - <child>` on the
-UCG Max. Active or resumed means blocked. Paused means the child has internet.
-Pausing the object hides its generated Block policy. The app does not edit
-Policy Table firewall policies, and it does not create or delete objects.
+UniFi gateway. Active or resumed means blocked. Paused means the child has
+internet. Pausing the object hides its generated Block policy. The app does
+not edit Policy Table firewall policies, and it does not create or delete
+objects.
 
 `dry_run: true` is how this ships. Dry-run makes zero UniFi object writes: it
 does not pause and it does not resume. It still writes the daily latch file
 when a child earns access. It logs the action it would have taken and does
 nothing to the gateway.
 
-Deployed manifests live in the kubernetes repo (`wifi-automation/`). This
-repository does not publish the image by hand. A GitHub release tagged
-`0.2.0` is what tags `ghcr.io/dmcanally/skylight-wifi-automation:0.2.0` for
-linux/amd64 and linux/arm64.
+## Deploying
+
+The process reads `CONFIG_PATH` (default `/config/config.yaml`) and these
+environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `SKYLIGHT_EMAIL` | Skylight login |
+| `SKYLIGHT_PASSWORD` | Skylight password |
+| `UNIFI_API_KEY` | Network Integration API key, sent only as `X-API-KEY` |
+| `CONFIG_PATH` | Config file path. Default `/config/config.yaml` |
+
+Metrics are served on port `8080`. The daily latch file defaults to
+`/tmp/skylight-wifi-latch.json`. A persistent volume is needed later if that
+latch should survive a restart.
 
 ## Rules
 
 Children are blocked by default. A child is unblocked for the rest of the
 local day once every required task is complete or skipped. The daily latch
 `unlocked_on[child]` keeps that access if a task is unchecked or added later
-the same day. The latch is stored in `/tmp/skylight-wifi-latch.json` (the pod
-emptyDir) and is dropped on the next local date. Dry-run still writes that
-file. Only UniFi object writes are disabled.
+the same day. The latch is stored in `/tmp/skylight-wifi-latch.json` and is
+dropped on the next local date. Dry-run still writes that file. Only UniFi
+object writes are disabled.
 
 At or after the cutoff the child is locked, including when Skylight is
-unreachable. Cutoffs come from config: 20:30 for Lanie and Libby, 20:00 for
-Tucker.
+unreachable. Cutoffs come from config: 20:30 for child-a and child-b, 20:00
+for child-c.
 
 `empty_day_unlocks` defaults to false. A day with no chores stays blocked.
 
@@ -51,15 +63,7 @@ key, the Skylight password, or a client MAC or IP address.
 
 ## Configuration
 
-Environment variables, from the `wifi-automation-secrets` Secret:
-
-| Variable | Purpose |
-| --- | --- |
-| `SKYLIGHT_EMAIL` | Skylight login |
-| `SKYLIGHT_PASSWORD` | Skylight password |
-| `UNIFI_API_KEY` | Network Integration API key, sent only as `X-API-KEY` |
-| `CONFIG_PATH` | Config file. The deployment sets `/config/config.yaml` |
-
+Environment variables and the config file path are listed under Deploying.
 `GOOGLE_WIFI_REFRESH_TOKEN` is not read.
 
 | Key | Default | Role |
@@ -79,10 +83,8 @@ Environment variables, from the `wifi-automation-secrets` Secret:
 | `children[].cutoff` | | Local `HH:MM`. At or after this, always lock |
 | `children[].manual_unblock` | `false` | Unlock before cutoff without chores |
 
-`config.example.yaml` matches those keys. Values there are not secrets. The
-certificate is the public console certificate.
-
-No ConfigMap key beyond that table is required.
+`config.example.yaml` matches those keys. Values there are examples. Paste
+the gateway console certificate over the placeholder in `unifi_tls_ca`.
 
 ## UniFi calls
 
@@ -184,8 +186,8 @@ Do not `PATCH` or `PUT` `/proxy/network/integration/v1/sites/{siteId}/firewall/p
 
 ## TLS
 
-Verification stays on. The hostname check is `unifi.local`, which is the host
-in `unifi_url`. `hostAliases` maps that name to `192.168.1.1`.
+Verification stays on. The hostname check uses the host in `unifi_url`
+(for example `unifi.local`).
 
 The TLS context is `ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)`. That constructor
 does not load the system CA store. The only trust anchor is
@@ -197,9 +199,9 @@ has no `basicConstraints` extension. The image stays on Python 3.12, and the
 SSL context clears only `VERIFY_X509_STRICT`. It never sets `verify=False` or
 `CERT_NONE`.
 
-Re-pin `unifi_tls_ca` before the certificate expires on 2028-09-19, and again
-after any firmware reset that regenerates it. A mismatch fails the poll, leaves
-every object unchanged, and stops `wifi_automation_last_success_timestamp_seconds`.
+Re-pin `unifi_tls_ca` before the certificate expires, and again after any
+firmware reset that regenerates it. A mismatch fails the poll, leaves every
+object unchanged, and stops `wifi_automation_last_success_timestamp_seconds`.
 
 ## Metrics
 
@@ -226,7 +228,8 @@ skylight-wifi --config config.yaml --once
 ## Image
 
 The container runs as uid 10001, with a read-only root filesystem. `/tmp` is
-the emptyDir. `.github/workflows/image.yaml` builds linux/amd64 and
-linux/arm64. A published GitHub release tags the image with that release tag
-and a leading `v` removed, so a release tagged `0.2.0` publishes
-`ghcr.io/dmcanally/skylight-wifi-automation:0.2.0`.
+writable. This repository does not publish the image by hand.
+`.github/workflows/image.yaml` builds linux/amd64 and linux/arm64. A published
+GitHub release tags the image with that release tag and a leading `v` removed,
+so a release tagged `0.2.1` publishes
+`ghcr.io/dmcanally/skylight-wifi-automation:0.2.1`.

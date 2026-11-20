@@ -9,7 +9,7 @@ from skylight_wifi_automation.models import Task
 def task(**overrides):
     values = {
         "id": "1",
-        "profile": "Lanie",
+        "profile": "Child A",
         "summary": "Dishes",
         "complete": False,
         "skipped": False,
@@ -108,7 +108,7 @@ def test_latch_keeps_access_when_a_task_is_unchecked():
 def test_other_profiles_do_not_block_the_child():
     result = decide(
         child(),
-        [task(profile="Libby")],
+        [task(profile="Child B")],
         chicago(2026, 8, 24, 18),
         app_config(),
         already_unlocked=False,
@@ -146,11 +146,17 @@ def test_cutoffs_follow_chicago_wall_time_across_dst():
         ).should_unlock
         is True
     )
-    # 2026-11-01 is the fall-back day. 20:15 CST is after Tucker's 20:00 and before 20:30.
+    # 2026-11-01 is the fall-back day. 20:15 CST is after the 20:00 cutoff and before 20:30.
     moment = chicago(2026, 11, 1, 20, 15)
     assert moment.utcoffset() == timedelta(hours=-6)
     assert (
-        decide(child("Tucker", "20:00"), [task(profile="Tucker", complete=True)], moment, config, already_unlocked=False).should_unlock
+        decide(
+            child("child-c", "20:00"),
+            [task(profile="Child C", complete=True)],
+            moment,
+            config,
+            already_unlocked=False,
+        ).should_unlock
         is False
     )
     assert (
