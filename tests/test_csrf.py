@@ -240,7 +240,7 @@ def test_plain_http_nodeport_headers_allow_the_first_post(tmp_path):
     """Chrome and WebKit on plain HTTP send Origin with the non-default port.
 
     Measured with headless Chrome 157 and Playwright WebKit 27.2 (Safari 27.2)
-    against http://172.30.0.2:30080. Both sent Origin and Referer including the
+    against http://192.0.2.10:30080. Both sent Origin and Referer including the
     port, and omitted Sec-Fetch-Site because the address is not a trustworthy
     URL. Loopback is trustworthy, so both sent Sec-Fetch-Site: same-origin.
     Safari before 16.4 has no Sec-Fetch-* headers; WebKit has sent Origin on
