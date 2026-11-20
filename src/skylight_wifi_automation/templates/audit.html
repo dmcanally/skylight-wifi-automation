@@ -1,21 +1,29 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>Audit</h1>
-<p>Page {{ listing.page }} of {{ listing.pages }} ({{ listing.total }}).</p>
-<table>
-  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
-  <tbody>
-    {% for row in listing.rows %}
-    <tr>
-      <td>{{ row.ts }}</td>
-      <td>{{ row.actor }}</td>
-      <td>{{ row.action }}</td>
-      <td>{{ row.target }}</td>
-      <td>{{ row.diff }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% if listing.page > 1 %}<a href="/audit?page={{ listing.page - 1 }}">Previous</a>{% endif %}
-{% if listing.page < listing.pages %}<a href="/audit?page={{ listing.page + 1 }}">Next</a>{% endif %}
+<header class="page-head">
+  <div>
+    <h1>Audit</h1>
+    <p class="lede">Page {{ listing.page }} of {{ listing.pages }} ({{ listing.total }}).</p>
+  </div>
+</header>
+<div class="table-scroll">
+  <table class="responsive">
+    <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for row in listing.rows %}
+      <tr>
+        <td data-label="When">{{ row.ts }}</td>
+        <td data-label="Actor">{{ row.actor }}</td>
+        <td data-label="Action">{{ row.action }}</td>
+        <td data-label="Target">{{ row.target }}</td>
+        <td data-label="Detail">{{ row.diff }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<nav class="pager" aria-label="Audit pages">
+  {% if listing.page > 1 %}<a class="btn btn-quiet" href="/audit?page={{ listing.page - 1 }}">Previous</a>{% endif %}
+  {% if listing.page < listing.pages %}<a class="btn btn-quiet" href="/audit?page={{ listing.page + 1 }}">Next</a>{% endif %}
+</nav>
 {% endblock %}

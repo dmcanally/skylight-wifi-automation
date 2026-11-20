@@ -3,42 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{{ title }} · Skylight Wi-Fi</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header>
-    <p class="brand">Skylight Wi-Fi</p>
-    {% if user %}
-    <nav>
-      <a href="/">Dashboard</a>
-      <a href="/children">Children</a>
-      <a href="/settings">Settings</a>
-      <a href="/unifi">UniFi</a>
-      <a href="/secrets">Secrets</a>
-      <a href="/audit">Audit</a>
-      <a href="/password">Password</a>
-      <form method="post" action="/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf }}">
-        <button type="submit" class="secondary">Log out</button>
-      </form>
-    </nav>
-    {% endif %}
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="/">
+        <span class="mark" aria-hidden="true"></span>
+        <span>Skylight Wi-Fi</span>
+      </a>
+      {% if user %}
+      <nav class="nav" aria-label="Primary">
+        <a href="/">Dashboard</a>
+        <a href="/children">Schedule</a>
+        <a href="/settings">Settings</a>
+        <a href="/unifi">UniFi</a>
+        <a href="/secrets">Secrets</a>
+        <a href="/audit">Audit</a>
+        <a href="/password">Password</a>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <button type="submit" class="btn btn-quiet">Log out</button>
+        </form>
+      </nav>
+      {% endif %}
+    </div>
   </header>
-  <main>
+  <main id="content" class="wrap">
     {% if read_only %}
-    <p class="banner">Schedule configuration is read-only because CONFIG_SOURCE=file. Secrets and the password can still be changed.</p>
+    <p class="banner" role="status">Schedule configuration is read-only because CONFIG_SOURCE=file. Secrets and the password can still be changed.</p>
     {% endif %}
     {% if saved %}
-    <p class="ok">Saved.</p>
+    <p class="banner ok" role="status">Saved.</p>
+    {% endif %}
+    {% if notice %}
+    <p class="banner warn" role="status">{{ notice }}</p>
     {% endif %}
     {% if errors %}
-    <ul class="errors">
-      {% for error in errors %}<li>{{ error }}</li>{% endfor %}
-    </ul>
+    <div class="banner bad" role="alert">
+      <ul>
+        {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    </div>
     {% endif %}
     {% block body %}{% endblock %}
   </main>
-  <footer>Version {{ version }}</footer>
+  <footer class="wrap foot">Version {{ version }}</footer>
 </body>
 </html>

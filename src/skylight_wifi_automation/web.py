@@ -116,30 +116,63 @@ def _stated_origin(request: Request) -> str | None:
     return value
 
 
-def same_origin(request: Request) -> bool:
-    """Decide whether a form post is same-origin.
+_FETCH_SITE_VALUES = {"same-origin", "same-site", "cross-site", "none"}
+STALE_MESSAGE = "Your session changed, please try again."
+
+
+def origin_failure(request: Request) -> str | None:
+    """Return a rejection check name, or None when the request is same-origin.
 
     A matching Origin is accepted. When Origin is missing or the literal null
     a browser sends, Sec-Fetch-Site must be same-origin. If that header is
     absent, a same-origin Referer is accepted. Any other Sec-Fetch-Site value
     is rejected, including when the Referer matches. No signal at all is
-    rejected. The CSRF token is checked separately and stays mandatory.
+    rejected. Plain HTTP to a non-loopback host is not a trustworthy URL, so
+    current Chrome and Safari omit Sec-Fetch-Site there and send Origin with
+    the non-default port. The CSRF token is checked separately and stays mandatory.
     """
     host = request.headers.get("host", "")
     if not host:
-        return False
+        return "no_signal"
     origin = _stated_origin(request)
     if origin is not None:
         parsed = urlsplit(origin)
-        return parsed.scheme in {"http", "https"} and parsed.netloc == host
+        if parsed.scheme in {"http", "https"} and parsed.netloc == host:
+            return None
+        return "origin_mismatch"
     fetch_site = request.headers.get("sec-fetch-site")
     if fetch_site is not None:
-        return fetch_site.strip().lower() == "same-origin"
+        if fetch_site.strip().lower() == "same-origin":
+            return None
+        return "fetch_site"
     referer = request.headers.get("referer")
     if not referer:
-        return False
+        return "no_signal"
     parsed = urlsplit(referer)
-    return parsed.scheme in {"http", "https"} and parsed.netloc == host
+    if parsed.scheme in {"http", "https"} and parsed.netloc == host:
+        return None
+    return "origin_mismatch"
+
+
+def same_origin(request: Request) -> bool:
+    return origin_failure(request) is None
+
+
+def _log_rejection(request: Request, check: str) -> None:
+    raw_fetch = request.headers.get("sec-fetch-site")
+    if raw_fetch is None:
+        fetch_site = "-"
+    else:
+        value = raw_fetch.strip().lower()
+        fetch_site = value if value in _FETCH_SITE_VALUES else "other"
+    LOGGER.warning(
+        "rejected state-changing request check=%s method=%s path=%s origin_present=%s sec_fetch_site=%s",
+        check,
+        request.method,
+        request.url.path,
+        "yes" if request.headers.get("origin") is not None else "no",
+        fetch_site,
+    )
 
 
 def session_cookie_name(secure: bool) -> str:
@@ -258,6 +291,8 @@ def render(request: Request, name: str, status_code: int = 200, **extra: object)
         "read_only": request.app.state.context.read_only,
         "saved": request.query_params.get("saved") == "1",
         "errors": extra.pop("errors", []),
+        "notice": extra.pop("notice", ""),
+        "message": extra.pop("message", ""),
         "version": __version__,
     }
     context.update(extra)
@@ -290,22 +325,106 @@ def clear_session_cookie(response: Response, secure: bool) -> None:
     )
 
 
+def blocked_page(request: Request) -> HTMLResponse:
+    return render(
+        request,
+        "blocked.html",
+        title="Request blocked",
+        message="Cross-site request blocked.",
+        status_code=403,
+    )
+
+
+async def stale_page(request: Request) -> Response:
+    """Re-render the form that was posted, with a fresh token and a notice."""
+    context: AppContext = request.app.state.context
+    path = request.url.path
+    notice = STALE_MESSAGE
+    if path == "/login":
+        return await login_page(request, notice=notice, status_code=403)
+    if path == "/setup":
+        if await context.store.get_admin() is not None:
+            return PlainTextResponse("Not found.", status_code=404)
+        if context.setup_token is None or len(context.setup_token) < 32:
+            return render(request, "setup_disabled.html", title="Setup", notice=notice, status_code=403)
+        token = await context.store.create_form_token(context.clock())
+        return render(
+            request,
+            "setup.html",
+            title="Setup",
+            csrf=token,
+            notice=notice,
+            status_code=403,
+        )
+    if path == "/settings":
+        config = await current_config(context)
+        return render(
+            request,
+            "settings.html",
+            title="Settings",
+            config=config,
+            notice=notice,
+            status_code=403,
+        )
+    if path == "/children" or path.startswith("/children/"):
+        config = await current_config(context)
+        rows = await context.store.list_children() if context.source == "db" else []
+        return render(
+            request,
+            "children.html",
+            title="Schedule",
+            config=config,
+            rows=rows,
+            notice=notice,
+            status_code=403,
+        )
+    if path == "/unifi":
+        config = await current_config(context)
+        return render(
+            request, "unifi.html", title="UniFi", config=config, notice=notice, status_code=403
+        )
+    if path == "/secrets" or path.startswith("/secrets/"):
+        statuses = await context.store.secret_statuses()
+        return render(
+            request,
+            "secrets.html",
+            title="Secrets",
+            statuses=statuses,
+            encryption_enabled=context.store.encryption_enabled,
+            test_result=None,
+            notice=notice,
+            status_code=403,
+        )
+    if path == "/password":
+        return render(request, "password.html", title="Password", notice=notice, status_code=403)
+    return await dashboard(request, notice=notice, status_code=403)
+
+
 async def posted(request: Request) -> tuple[FormData, Response | None]:
-    if not same_origin(request):
-        return FormData(), PlainTextResponse("Cross-site request blocked.", status_code=403)
+    failure = origin_failure(request)
+    if failure is not None:
+        _log_rejection(request, failure)
+        return FormData(), blocked_page(request)
     try:
         form = await request.form()
     except Exception:  # noqa: BLE001 - a bad body is a failed CSRF check
-        return FormData(), PlainTextResponse("Cross-site request blocked.", status_code=403)
+        _log_rejection(request, "bad_form")
+        return FormData(), blocked_page(request)
     token = str(form.get("csrf_token") or "")
     user = current_user(request)
     context: AppContext = request.app.state.context
     if user is not None:
         if not constant_equal(token, user.csrf):
-            return form, PlainTextResponse("Cross-site request blocked.", status_code=403)
+            _log_rejection(request, "csrf_mismatch")
+            if token:
+                return form, await stale_page(request)
+            return form, blocked_page(request)
         return form, None
     if not await context.store.consume_form_token(token, context.clock()):
-        return form, PlainTextResponse("Cross-site request blocked.", status_code=403)
+        _log_rejection(request, "form_token")
+        if token:
+            return form, await stale_page(request)
+        return form, blocked_page(request)
     return form, None
 
 
@@ -365,7 +484,14 @@ class SecurityGate:
                 await response(scope, receive, send_with_headers)
                 return
             if user is None:
-                response = unauthorized(request.method)
+                context: AppContext = request.app.state.context
+                needs_setup = (
+                    request.method in {"GET", "HEAD"} and await context.store.get_admin() is None
+                )
+                if needs_setup:
+                    response = RedirectResponse("/setup", status_code=303)
+                else:
+                    response = unauthorized(request.method)
                 await response(scope, receive, send_with_headers)
                 return
             scope["skylight_user"] = user
@@ -392,8 +518,15 @@ async def healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "version": __version__})
 
 
-async def login_page(request: Request, error: str | None = None) -> HTMLResponse:
+async def login_page(
+    request: Request,
+    error: str | None = None,
+    notice: str = "",
+    status_code: int = 200,
+) -> Response:
     context: AppContext = request.app.state.context
+    if await context.store.get_admin() is None:
+        return RedirectResponse("/setup", status_code=303)
     token = await context.store.create_form_token(context.clock())
     return render(
         request,
@@ -401,12 +534,14 @@ async def login_page(request: Request, error: str | None = None) -> HTMLResponse
         title="Sign in",
         csrf=token,
         error=error,
+        notice=notice,
         created=request.query_params.get("created") == "1",
+        status_code=status_code,
     )
 
 
 async def login(request: Request) -> Response:
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         return await login_page(request)
     context: AppContext = request.app.state.context
     form: FormData = request.state.form
@@ -441,7 +576,7 @@ async def setup(request: Request) -> Response:
         return render(request, "setup_disabled.html", title="Setup")
     now = context.clock()
     ip = client_ip(request)
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token)
     form, denied = await posted(request)
@@ -494,7 +629,12 @@ async def logout(request: Request) -> Response:
     return response
 
 
-async def dashboard(request: Request, errors: list[str] | None = None, status_code: int = 200) -> HTMLResponse:
+async def dashboard(
+    request: Request,
+    errors: list[str] | None = None,
+    status_code: int = 200,
+    notice: str = "",
+) -> HTMLResponse:
     context: AppContext = request.app.state.context
     config = await current_config(context)
     now = context.clock()
@@ -556,6 +696,7 @@ async def dashboard(request: Request, errors: list[str] | None = None, status_co
         dry_run=config.dry_run,
         poll_at=format_local(poll_at, zone) if poll_at is not None else None,
         errors=errors or [],
+        notice=notice,
     )
 
 
@@ -934,9 +1075,15 @@ async def password(request: Request) -> Response:
 async def unhandled(request: Request, exc: Exception) -> Response:
     if isinstance(exc, HTTPException):
         detail = exc.detail if isinstance(exc.detail, str) else "Error"
-        return PlainTextResponse(detail, status_code=exc.status_code)
+        return render(request, "blocked.html", title="Error", message=detail, status_code=exc.status_code)
     LOGGER.error("request failed error_type=%s", type(exc).__name__)
-    return PlainTextResponse("Something went wrong.", status_code=500)
+    return render(
+        request,
+        "blocked.html",
+        title="Error",
+        message="Something went wrong.",
+        status_code=500,
+    )
 
 
 def create_app(context: AppContext) -> Starlette:

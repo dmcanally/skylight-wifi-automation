@@ -76,8 +76,9 @@ overrides.
    shorter value is ignored and setup stays disabled. There is no default
    password.
 4. Set `COOKIE_SECURE=false` when the UI is plain HTTP. Open
-   `http://<lan-host>:8000/setup`, create an admin, and use a password of at
-   least 12 characters.
+   `http://<lan-host>:8000`. Until an admin exists, the first page is setup.
+   Create an admin and use a password of at least 12 characters. `/setup`
+   still works directly, and it returns 404 once the admin exists.
 5. Unset `ADMIN_SETUP_TOKEN` and sign in.
 
 Empty secret fields are left unchanged. Clear removes the database copy and
