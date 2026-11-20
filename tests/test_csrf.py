@@ -383,3 +383,20 @@ def test_replayed_login_token_asks_the_user_to_retry(tmp_path, caplog):
             follow_redirects=False,
         )
     assert retried.status_code == 303
+
+
+def test_bad_form_body_is_logged_separately(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="skylight_wifi_automation.web")
+    bundle = build(tmp_path)
+    with TestClient(bundle.app) as client:
+        response = client.post(
+            "/login",
+            content=b"not a multipart body",
+            headers={
+                "content-type": "multipart/form-data; boundary=----bound",
+                "origin": "http://testserver",
+            },
+        )
+    assert response.status_code == 403
+    assert "check=bad_form" in caplog.text
+    assert "check=form_token" not in caplog.text

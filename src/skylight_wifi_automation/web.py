@@ -468,7 +468,7 @@ async def posted(request: Request) -> tuple[FormData, Response | None]:
     try:
         form = await request.form()
     except Exception:  # noqa: BLE001 - a bad body is a failed CSRF check
-        _log_rejection(request, "form_token")
+        _log_rejection(request, "bad_form")
         return FormData(), blocked_page(request)
     token = str(form.get("csrf_token") or "")
     user = current_user(request)
