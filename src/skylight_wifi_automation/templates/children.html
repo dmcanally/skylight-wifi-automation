@@ -1,51 +1,85 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>Children</h1>
+<header class="page-head">
+  <div>
+    <h1>Schedule</h1>
+    <p class="lede">Each child keeps one cutoff. After that time, the network closes for the rest of the local day.</p>
+  </div>
+</header>
 {% if read_only %}
-<table>
-  <thead><tr><th>Label</th><th>Profile</th><th>Object</th><th>Cutoff</th></tr></thead>
-  <tbody>
-    {% for child in config.children %}
-    <tr>
-      <td>{{ child.name }}</td>
-      <td>{{ child.skylight_profile }}</td>
-      <td>{{ child.object_name }}</td>
-      <td>{{ child.cutoff.strftime("%H:%M") }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="table-scroll">
+  <table class="responsive">
+    <thead><tr><th>Label</th><th>Profile</th><th>Object</th><th>Cutoff</th></tr></thead>
+    <tbody>
+      {% for child in config.children %}
+      <tr>
+        <td data-label="Label">{{ child.name }}</td>
+        <td data-label="Profile">{{ child.skylight_profile }}</td>
+        <td data-label="Object">{{ child.object_name }}</td>
+        <td data-label="Cutoff">{{ child.cutoff.strftime("%H:%M") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
-{% for child in rows %}
-<form class="card" method="post" action="/children/{{ child.id }}">
-  <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <label for="label-{{ child.id }}">Label</label>
-  <input id="label-{{ child.id }}" name="label" value="{{ child.label }}">
-  <label for="profile-{{ child.id }}">Skylight profile</label>
-  <input id="profile-{{ child.id }}" name="skylight_profile" value="{{ child.skylight_profile }}">
-  <label for="object-{{ child.id }}">Object name</label>
-  <input id="object-{{ child.id }}" name="object_name" value="{{ child.object_name }}">
-  <label for="cutoff-{{ child.id }}">Cutoff</label>
-  <input id="cutoff-{{ child.id }}" name="cutoff" value="{{ child.cutoff }}">
-  <button type="submit">Save</button>
-</form>
-<form method="post" action="/children/{{ child.id }}/delete">
-  <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <button type="submit" class="secondary">Delete {{ child.label }}</button>
-</form>
-{% endfor %}
-<h2>Add a child</h2>
-<form method="post" action="/children">
-  <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <label for="label">Label</label>
-  <input id="label" name="label">
-  <label for="skylight_profile">Skylight profile</label>
-  <input id="skylight_profile" name="skylight_profile">
-  <label for="object_name">Object name</label>
-  <input id="object_name" name="object_name">
-  <label for="cutoff">Cutoff</label>
-  <input id="cutoff" name="cutoff" placeholder="20:30">
-  <button type="submit">Add</button>
-</form>
+<div class="stack">
+  {% for child in rows %}
+  <article class="card">
+    <h2>{{ child.label }}</h2>
+    <form method="post" action="/children/{{ child.id }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <div class="grid">
+        <div>
+          <label for="label-{{ child.id }}">Label</label>
+          <input id="label-{{ child.id }}" name="label" value="{{ child.label }}">
+        </div>
+        <div>
+          <label for="profile-{{ child.id }}">Skylight profile</label>
+          <input id="profile-{{ child.id }}" name="skylight_profile" value="{{ child.skylight_profile }}">
+        </div>
+        <div>
+          <label for="object-{{ child.id }}">Object name</label>
+          <input id="object-{{ child.id }}" name="object_name" value="{{ child.object_name }}">
+        </div>
+        <div>
+          <label for="cutoff-{{ child.id }}">Cutoff</label>
+          <input id="cutoff-{{ child.id }}" name="cutoff" value="{{ child.cutoff }}">
+        </div>
+      </div>
+      <button type="submit">Save</button>
+    </form>
+    <form method="post" action="/children/{{ child.id }}/delete">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button type="submit" class="btn-quiet">Delete {{ child.label }}</button>
+    </form>
+  </article>
+  {% endfor %}
+</div>
+<article class="card">
+  <h2>Add a child</h2>
+  <form method="post" action="/children">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="grid">
+      <div>
+        <label for="label">Label</label>
+        <input id="label" name="label" autocomplete="off">
+      </div>
+      <div>
+        <label for="skylight_profile">Skylight profile</label>
+        <input id="skylight_profile" name="skylight_profile" autocomplete="off">
+      </div>
+      <div>
+        <label for="object_name">Object name</label>
+        <input id="object_name" name="object_name" autocomplete="off">
+      </div>
+      <div>
+        <label for="cutoff">Cutoff</label>
+        <input id="cutoff" name="cutoff" placeholder="20:30" autocomplete="off">
+      </div>
+    </div>
+    <button type="submit">Add</button>
+  </form>
+</article>
 {% endif %}
 {% endblock %}

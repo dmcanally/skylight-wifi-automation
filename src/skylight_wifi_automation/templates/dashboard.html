@@ -1,40 +1,69 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>Dashboard</h1>
-{% if dry_run %}<p class="banner">Dry-run is on. Overrides change the logged action only. UniFi objects are not written.</p>{% endif %}
-{% if poll_at %}<p>Last poll {{ poll_at }}.</p>{% else %}<p>No poll yet.</p>{% endif %}
-{% for child in children %}
-<section class="card">
-  <h2>{{ child.label }}</h2>
-  <p>Object {{ child.object_name }}</p>
-  <p>Tasks {{ child.tasks }}. State {{ child.state }}. Reason: {{ child.reason }}</p>
-  <p>Override: {{ child.override_text }}</p>
-  {% if not read_only %}
-  <p>A manual block or unblock lasts until {{ child.expiry_text }}.</p>
-  <div class="actions">
-    <form method="post" action="/overrides/{{ child.child_id }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <input type="hidden" name="action" value="block">
-      <button type="submit">Block</button>
-    </form>
-    <form method="post" action="/overrides/{{ child.child_id }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <input type="hidden" name="action" value="unblock">
-      {% if child.past_cutoff %}
-      <p>This is after today's cutoff, so the unblock lasts until {{ child.expiry_text }}. Type UNBLOCK to confirm.</p>
-      <label for="confirm-{{ child.child_id }}">Confirmation</label>
-      <input id="confirm-{{ child.child_id }}" name="confirm" autocomplete="off">
-      {% endif %}
-      <button type="submit">Unblock</button>
-    </form>
-    {% if child.has_override %}
-    <form method="post" action="/overrides/{{ child.child_id }}/clear">
-      <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <button type="submit" class="secondary">Clear</button>
-    </form>
-    {% endif %}
+<header class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="lede">Who has the network right now, and any override still running.</p>
   </div>
-  {% endif %}
-</section>
-{% endfor %}
+  {% if poll_at %}<p class="meta">Last poll {{ poll_at }}.</p>{% else %}<p class="meta">No poll yet.</p>{% endif %}
+</header>
+{% if dry_run %}<p class="banner" role="status">Dry-run is on. Overrides change the logged action only. UniFi objects are not written.</p>{% endif %}
+<div class="stack">
+  {% for child in children %}
+  <article class="card">
+    <div class="card-head">
+      <div>
+        <h2>{{ child.label }}</h2>
+        <p class="meta">Object {{ child.object_name }}</p>
+      </div>
+      <div class="pills" aria-label="Status for {{ child.label }}">
+        {% if child.state == "Blocked" %}
+        <span class="pill pill-bad">Blocked</span>
+        {% elif child.state == "Unblocked" %}
+        <span class="pill pill-ok">Online</span>
+        {% elif child.state == "Unknown" %}
+        <span class="pill">Waiting</span>
+        {% else %}
+        <span class="pill">{{ child.state }}</span>
+        {% endif %}
+        {% if child.has_override %}
+        <span class="pill pill-warn">Override until {{ child.expiry_text }}</span>
+        {% endif %}
+      </div>
+    </div>
+    <dl class="facts">
+      <div><dt>Tasks</dt><dd>{{ child.tasks }}</dd></div>
+      <div><dt>State</dt><dd>{{ child.state }}</dd></div>
+      <div><dt>Reason</dt><dd>{{ child.reason }}</dd></div>
+    </dl>
+    <p class="meta">Override: {{ child.override_text }}</p>
+    {% if not read_only %}
+    <p class="meta">A manual block or unblock lasts until {{ child.expiry_text }}.</p>
+    <div class="actions">
+      <form method="post" action="/overrides/{{ child.child_id }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="hidden" name="action" value="block">
+        <button type="submit">Block</button>
+      </form>
+      <form method="post" action="/overrides/{{ child.child_id }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <input type="hidden" name="action" value="unblock">
+        {% if child.past_cutoff %}
+        <p>This is after today's cutoff, so the unblock lasts until {{ child.expiry_text }}. Type UNBLOCK to confirm.</p>
+        <label for="confirm-{{ child.child_id }}">Confirmation</label>
+        <input id="confirm-{{ child.child_id }}" name="confirm" autocomplete="off">
+        {% endif %}
+        <button type="submit" class="btn-quiet">Unblock</button>
+      </form>
+      {% if child.has_override %}
+      <form method="post" action="/overrides/{{ child.child_id }}/clear">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button type="submit" class="btn-quiet">Clear</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endif %}
+  </article>
+  {% endfor %}
+</div>
 {% endblock %}

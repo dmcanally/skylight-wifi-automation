@@ -1,32 +1,41 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>Settings</h1>
-<form method="post" action="/settings">
-  <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <label for="timezone">Timezone</label>
-  <input id="timezone" name="timezone" value="{{ config.timezone }}" {% if read_only %}disabled{% endif %}>
-  <label for="poll_seconds">Poll seconds</label>
-  <input id="poll_seconds" name="poll_seconds" value="{{ config.poll_seconds }}" {% if read_only %}disabled{% endif %}>
-  <label for="dry_run">Dry-run</label>
-  <select id="dry_run" name="dry_run" {% if read_only %}disabled{% endif %}>
-    <option value="true" {% if config.dry_run %}selected{% endif %}>true</option>
-    <option value="false" {% if not config.dry_run %}selected{% endif %}>false</option>
-  </select>
-  <label for="include_late">Include late tasks</label>
-  <select id="include_late" name="include_late" {% if read_only %}disabled{% endif %}>
-    <option value="true" {% if config.include_late %}selected{% endif %}>true</option>
-    <option value="false" {% if not config.include_late %}selected{% endif %}>false</option>
-  </select>
-  <label for="include_routines">Include routines</label>
-  <select id="include_routines" name="include_routines" {% if read_only %}disabled{% endif %}>
-    <option value="true" {% if config.include_routines %}selected{% endif %}>true</option>
-    <option value="false" {% if not config.include_routines %}selected{% endif %}>false</option>
-  </select>
-  <label for="empty_day_unlocks">Empty day unlocks</label>
-  <select id="empty_day_unlocks" name="empty_day_unlocks" {% if read_only %}disabled{% endif %}>
-    <option value="true" {% if config.empty_day_unlocks %}selected{% endif %}>true</option>
-    <option value="false" {% if not config.empty_day_unlocks %}selected{% endif %}>false</option>
-  </select>
-  {% if not read_only %}<button type="submit">Save</button>{% endif %}
-</form>
+<section class="panel">
+  <h1>Settings</h1>
+  <p class="lede">Timezone, poll interval, and how an empty day is treated.</p>
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="grid">
+      <div>
+        <label for="timezone">Timezone</label>
+        <input id="timezone" name="timezone" value="{{ config.timezone }}" {% if read_only %}disabled{% endif %}>
+      </div>
+      <div>
+        <label for="poll_seconds">Poll seconds</label>
+        <input id="poll_seconds" name="poll_seconds" inputmode="numeric" value="{{ config.poll_seconds }}" {% if read_only %}disabled{% endif %}>
+      </div>
+    </div>
+    <label for="dry_run">Dry-run</label>
+    <select id="dry_run" name="dry_run" {% if read_only %}disabled{% endif %}>
+      <option value="true" {% if config.dry_run %}selected{% endif %}>true</option>
+      <option value="false" {% if not config.dry_run %}selected{% endif %}>false</option>
+    </select>
+    <label for="include_late">Include late tasks</label>
+    <select id="include_late" name="include_late" {% if read_only %}disabled{% endif %}>
+      <option value="true" {% if config.include_late %}selected{% endif %}>true</option>
+      <option value="false" {% if not config.include_late %}selected{% endif %}>false</option>
+    </select>
+    <label for="include_routines">Include routines</label>
+    <select id="include_routines" name="include_routines" {% if read_only %}disabled{% endif %}>
+      <option value="true" {% if config.include_routines %}selected{% endif %}>true</option>
+      <option value="false" {% if not config.include_routines %}selected{% endif %}>false</option>
+    </select>
+    <label for="empty_day_unlocks">Empty day unlocks</label>
+    <select id="empty_day_unlocks" name="empty_day_unlocks" {% if read_only %}disabled{% endif %}>
+      <option value="true" {% if config.empty_day_unlocks %}selected{% endif %}>true</option>
+      <option value="false" {% if not config.empty_day_unlocks %}selected{% endif %}>false</option>
+    </select>
+    {% if not read_only %}<button type="submit">Save</button>{% endif %}
+  </form>
+</section>
 {% endblock %}
