@@ -355,18 +355,15 @@ class Store:
                     raise
 
     def _backup_database(self) -> None:
-        """Keep one pre-migration copy of app.db, created mode 0600, next to the live file."""
+        """Copy app.db to a new 0600 file. A same-second name that already exists is kept."""
         checkpoint = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint is None or int(checkpoint[0]) != 0:
             raise RuntimeError("database checkpoint failed; refusing to migrate without a backup")
         stamp = self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-        dest = self.path.parent / f"{self.path.name}.bak-{stamp}"
-        if dest.exists():
-            dest.unlink()
         previous = os.umask(0o077)
+        dest: Path | None = None
         try:
-            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            os.close(fd)
+            dest = self._create_backup_file(stamp)
             target = sqlite3.connect(dest)
             try:
                 self._conn.backup(target)
@@ -379,13 +376,33 @@ class Store:
             if dest.stat().st_mode & 0o777 != 0o600:
                 raise RuntimeError("migration backup was not created with mode 0600")
         except Exception:
-            dest.unlink(missing_ok=True)
+            if dest is not None and dest.exists():
+                dest.unlink()
             raise
         finally:
             os.umask(previous)
+        kept = f"{self.path.name}.bak-{stamp}"
         for old in self.path.parent.glob(f"{self.path.name}.bak-*"):
-            if old != dest:
-                old.unlink()
+            if old.name == kept or old.name.startswith(f"{kept}-"):
+                continue
+            old.unlink()
+
+    def _create_backup_file(self, stamp: str) -> Path:
+        """Create a new 0600 backup path. An existing same-second file is left in place."""
+        number = 0
+        while True:
+            suffix = "" if number == 0 else f"-{number}"
+            dest = self.path.parent / f"{self.path.name}.bak-{stamp}{suffix}"
+            if dest.exists():
+                number += 1
+                continue
+            try:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            except FileExistsError:
+                number += 1
+                continue
+            os.close(fd)
+            return dest
 
     def _column_names(self, conn: sqlite3.Connection, table: str) -> set[str]:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -841,29 +858,19 @@ class Store:
         return token, csrf
 
     def _session_hints(self, token: str) -> tuple[bool, str, datetime | None]:
-        """Remember flag, user agent, and the earliest absolute-cap anchor for that choice."""
+        """Remember flag, user agent, and this session's own absolute-cap anchor."""
         if not token:
             return False, "", None
         with self._lock:
             row = self._conn.execute(
-                """SELECT remember, user_agent, username, cap_at, created_at
+                """SELECT remember, user_agent, cap_at, created_at
                    FROM sessions WHERE token_hash = ?""",
                 (hash_token(token),),
             ).fetchone()
-            if row is None:
-                return False, "", None
-            remember = bool(row["remember"])
-            others = self._conn.execute(
-                """SELECT cap_at, created_at FROM sessions
-                   WHERE username = ? AND remember = ?""",
-                (row["username"], 1 if remember else 0),
-            ).fetchall()
-        anchors = [
-            load_dt(item["cap_at"]) if item["cap_at"] else load_dt(item["created_at"])
-            for item in others
-        ]
-        own = load_dt(row["cap_at"]) if row["cap_at"] else load_dt(row["created_at"])
-        return remember, str(row["user_agent"] or ""), min(anchors) if anchors else own
+        if row is None:
+            return False, "", None
+        anchor = load_dt(row["cap_at"]) if row["cap_at"] else load_dt(row["created_at"])
+        return bool(row["remember"]), str(row["user_agent"] or ""), anchor
 
     def _use_session(self, token: str, now: datetime) -> Session | None:
         if not token:

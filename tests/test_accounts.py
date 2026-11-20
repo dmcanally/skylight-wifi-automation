@@ -885,6 +885,106 @@ def test_password_change_keeps_the_original_absolute_cap(tmp_path):
         )
 
 
+def _remember(client: TestClient, username: str = USERNAME, password: str = PASSWORD) -> str:
+    page = client.get("/login")
+    signed = client.post(
+        "/login",
+        data={
+            "csrf_token": csrf_from(page.text),
+            "username": username,
+            "password": password,
+            "remember": "1",
+        },
+        headers=SAME_SITE,
+        follow_redirects=False,
+    )
+    assert signed.status_code == 303
+    return _cookie_value(signed.headers["set-cookie"])
+
+
+def test_password_change_uses_only_the_current_sessions_cap(tmp_path):
+    """An idle remember-me row must not shorten the browser that changes the password."""
+    start = datetime(2026, 1, 15, tzinfo=UTC)
+    bundle = build(tmp_path, moment=start)
+    new_password = "rotated-password"
+    with TestClient(bundle.app) as first, TestClient(bundle.app) as second:
+        sign_in(first)
+        first.cookies.clear()
+        idle = _remember(first)
+        # Sign the second browser in while the idle row's stored expiry is still ahead,
+        # so that row is still present when the password changes on day 100.
+        bundle.clock.moment = start + timedelta(days=20)
+        second.cookies.clear()
+        current = _remember(second)
+        for day in (45, 70, 95):
+            bundle.clock.moment = start + timedelta(days=day)
+            second.cookies.clear()
+            slid = second.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={current}"},
+                follow_redirects=False,
+            )
+            assert slid.status_code == 200
+        bundle.clock.moment = start + timedelta(days=100)
+        second.cookies.clear()
+        form = second.get("/password", headers={"cookie": f"{PLAIN_SESSION_COOKIE}={current}"})
+        changed = second.post(
+            "/password",
+            data={
+                "csrf_token": csrf_from(form.text),
+                "current_password": PASSWORD,
+                "new_password": new_password,
+                "password2": new_password,
+            },
+            headers={**ORIGIN, "cookie": f"{PLAIN_SESSION_COOKIE}={current}"},
+            follow_redirects=False,
+        )
+        assert changed.status_code == 303
+        fresh = changed.headers["set-cookie"]
+        new_value = _cookie_value(fresh)
+        assert new_value != current
+        assert "max-age=864000" in fresh.lower()
+        second.cookies.clear()
+        assert (
+            second.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={new_value}"},
+                follow_redirects=False,
+            ).status_code
+            == 200
+        )
+        first.cookies.clear()
+        assert (
+            first.get(
+                "/",
+                headers={"cookie": f"{PLAIN_SESSION_COOKIE}={idle}"},
+                follow_redirects=False,
+            ).status_code
+            == 303
+        )
+    rows = db_rows(bundle.store.path, "SELECT cap_at FROM sessions")
+    assert [row["cap_at"] for row in rows] == [dump_dt(start + timedelta(days=20))]
+
+
+def test_same_second_backups_both_survive(tmp_path):
+    moment = datetime(2026, 3, 2, 8, tzinfo=UTC)
+    path = tmp_path / "app.db"
+    _v1_database(path, moment - timedelta(hours=1), "backup-token", last_seen=moment)
+    previous = os.umask(0)
+    store = Store(path, None, lambda: moment)
+    try:
+        store._backup_database()
+    finally:
+        os.umask(previous)
+        store.close()
+    backups = sorted(path.parent.glob("app.db.bak-*"))
+    assert [item.name for item in backups] == [
+        "app.db.bak-20260302T080000Z",
+        "app.db.bak-20260302T080000Z-1",
+    ]
+    assert all(item.stat().st_mode & 0o777 == 0o600 for item in backups)
+
+
 def test_rejection_log_cannot_be_split_by_a_newline(tmp_path, caplog):
     from types import SimpleNamespace
 
