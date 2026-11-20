@@ -30,6 +30,11 @@ from .timeutil import dump_dt, load_dt
 
 LOGGER = logging.getLogger(__name__)
 
+# Login subjects are truncated to 64 characters. This key is longer, and it
+# starts with a byte the username form rejects, so a setup lockout cannot
+# collide with an account named "setup".
+SETUP_LOCK_SUBJECT = "\x00setup-lockout-" + ("0" * 64)
+
 SETTING_KEYS = (
     "timezone",
     "poll_seconds",
@@ -196,12 +201,38 @@ class AuditPage:
 
 
 def _require_writable_dir(directory: Path) -> None:
-    if not directory.exists() or not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
+    if not directory.is_dir():
         raise RuntimeError(f"DATA_DIR is not writable: {directory}")
+    probe = directory / f".swa-write-probe-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with probe.open("xb") as handle:
+            handle.write(b"ok")
+            handle.flush()
+    except OSError:
+        raise RuntimeError(f"DATA_DIR is not writable: {directory}") from None
+    try:
+        probe.unlink()
+    except OSError:
+        raise RuntimeError(f"DATA_DIR is not writable: {directory}") from None
+    _restrict_dir_mode(directory)
+
+
+def _restrict_dir_mode(directory: Path) -> None:
+    try:
+        owned = directory.stat().st_uid == os.getuid()
+    except OSError:
+        LOGGER.warning("could not set DATA_DIR mode to 0700: %s", directory)
+        return
+    if not owned:
+        LOGGER.warning(
+            "DATA_DIR is not owned by this process; leaving its mode unchanged: %s",
+            directory,
+        )
+        return
     try:
         os.chmod(directory, 0o700)
     except OSError:
-        raise RuntimeError(f"DATA_DIR is not writable: {directory}") from None
+        LOGGER.warning("could not set DATA_DIR mode to 0700: %s", directory)
 
 
 def _private_mode(path: Path) -> None:

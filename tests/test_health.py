@@ -30,7 +30,7 @@ def test_healthz_is_public_and_leaks_nothing(tmp_path, monkeypatch):
         assert header in {name.lower() for name in response.headers}
     assert response.headers["content-security-policy"] == "default-src 'self'; frame-ancestors 'none'"
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
 
 
 def test_static_css_is_public_and_has_security_headers(tmp_path):

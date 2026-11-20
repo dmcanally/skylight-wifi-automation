@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -63,8 +64,29 @@ def setup_token() -> str | None:
     return token
 
 
+def _proxy_token_is_open(token: str) -> bool:
+    if token == "*":
+        return True
+    if "/" not in token:
+        return False
+    try:
+        network = ipaddress.ip_network(token, strict=False)
+    except ValueError:
+        return False
+    return network.prefixlen == 0
+
+
 def trusted_proxies() -> str:
-    return os.environ.get("TRUSTED_PROXIES", "").strip()
+    raw = os.environ.get("TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return ""
+    for item in raw.split(","):
+        token = item.strip()
+        if token and _proxy_token_is_open(token):
+            raise RuntimeError(
+                "TRUSTED_PROXIES must list specific proxy addresses, not *, 0.0.0.0/0, or ::/0"
+            )
+    return raw
 
 
 def load_named_key(name: str) -> bytes | None:

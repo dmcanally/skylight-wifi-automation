@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -32,6 +33,24 @@ def dummy_password_hash(hasher: PasswordHasher) -> str:
     return hasher.hash("skylight-wifi-dummy-password")
 
 
+async def _limited_to_thread(func: Callable[..., Any], *args: Any) -> Any:
+    """Run func off the loop and hold the slot until that thread finishes.
+
+    Cancelling the caller used to leave the semaphore inside ``async with``
+    and free the slot while argon2 was still running. The done callback
+    releases the slot, and shield keeps the worker alive across that cancel.
+    """
+    limit = _hasher_limit()
+    await limit.acquire()
+    try:
+        task = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    except BaseException:
+        limit.release()
+        raise
+    task.add_done_callback(lambda _done: limit.release())
+    return await asyncio.shield(task)
+
+
 def argon2_concurrency() -> int:
     raw = os.environ.get("ARGON2_CONCURRENCY", "2")
     try:
@@ -51,15 +70,13 @@ def _hasher_limit() -> asyncio.Semaphore:
 
 
 async def hash_password_off_loop(hasher: PasswordHasher, password: str) -> str:
-    async with _hasher_limit():
-        return await asyncio.to_thread(hash_password, hasher, password)
+    return await _limited_to_thread(hash_password, hasher, password)
 
 
 async def verify_password_off_loop(
     hasher: PasswordHasher, password_hash: str, password: str
 ) -> bool:
-    async with _hasher_limit():
-        return await asyncio.to_thread(verify_password, hasher, password_hash, password)
+    return await _limited_to_thread(verify_password, hasher, password_hash, password)
 
 
 async def attempt_login(

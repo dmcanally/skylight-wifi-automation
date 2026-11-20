@@ -178,6 +178,29 @@ def test_missing_or_unusable_data_dir_is_one_line(tmp_path, monkeypatch):
         Store(blocked / "app.db", None)
 
 
+def test_chmod_failure_on_a_writable_data_dir_still_starts(tmp_path, caplog, monkeypatch):
+    from pathlib import Path
+
+    from skylight_wifi_automation import store as store_module
+
+    real_chmod = store_module.os.chmod
+
+    def chmod(path, mode):
+        if Path(path) == tmp_path and mode == 0o700:
+            raise PermissionError("read-only volume")
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(store_module.os, "chmod", chmod)
+    caplog.set_level(logging.WARNING, logger="skylight_wifi_automation.store")
+    opened = store_module.Store(tmp_path / "app.db", None)
+    try:
+        assert (tmp_path / "app.db").stat().st_mode & 0o777 == 0o600
+        assert list(tmp_path.glob(".swa-write-probe-*")) == []
+    finally:
+        opened.close()
+    assert "could not set DATA_DIR mode to 0700" in caplog.text
+
+
 def test_unknown_timezone_is_a_form_error(tmp_path):
     bundle = build(tmp_path)
     with TestClient(bundle.app) as client:

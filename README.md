@@ -94,8 +94,10 @@ HttpOnly and SameSite=Strict.
 
 `DATA_DIR` must already exist and be writable by uid 10001. If it is missing
 or not writable, startup logs one line, `DATA_DIR is not writable: ...`, and
-exits. The database file and its WAL and SHM files are mode `0600`. The
-directory is mode `0700`.
+exits. Writability is a real temp-file create and delete. The database file
+and its WAL and SHM files are mode `0600`. When this process owns the
+directory, it sets the directory to mode `0700`. If it does not own the
+directory, or that mode change is refused, it logs a warning and continues.
 
 `TRUSTED_PROXIES` is empty unless you set it. The process only reads
 `X-Forwarded-For` when the connecting peer is in that list (an IP or a CIDR),
@@ -125,7 +127,8 @@ To rotate the key without retyping the secrets:
 
 1. Keep the current key in `APP_ENCRYPTION_KEY`.
 2. Put the new 32-byte key, base64-encoded, in `APP_ENCRYPTION_KEY_NEW`.
-3. Run `skylight-wifi rotate-key`.
+3. Run `skylight-wifi rotate-key` with the pod scaled to 0, or restart the pod
+   right away after running it.
 4. Move the new key to `APP_ENCRYPTION_KEY`, unset `APP_ENCRYPTION_KEY_NEW`,
    and restart.
 

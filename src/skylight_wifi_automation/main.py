@@ -195,6 +195,10 @@ def main(argv: list[str] | None = None) -> None:
         except RuntimeError as exc:
             _fail(exc)
         return
+    try:
+        trusted_proxies()
+    except RuntimeError as exc:
+        _fail(exc)
     start_http_server(8080)
     asyncio.run(async_main(argv))
 

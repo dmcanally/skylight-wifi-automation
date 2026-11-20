@@ -41,7 +41,7 @@ from .overrides import ConfirmationRequired, OverrideError, override_expiry
 from .runtime import test_connections
 from .secrets import SECRET_NAMES
 from .security import constant_equal
-from .store import ConfigWriteError, Store
+from .store import SETUP_LOCK_SUBJECT, ConfigWriteError, Store
 
 LOGGER = logging.getLogger(__name__)
 
@@ -106,14 +106,35 @@ def current_user(request: Request) -> Visitor | None:
     return user if isinstance(user, Visitor) else None
 
 
+def _stated_origin(request: Request) -> str | None:
+    raw = request.headers.get("origin")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "" or value.lower() == "null":
+        return None
+    return value
+
+
 def same_origin(request: Request) -> bool:
+    """Decide whether a form post is same-origin.
+
+    A matching Origin is accepted. When Origin is missing or the literal null
+    a browser sends, Sec-Fetch-Site must be same-origin. If that header is
+    absent, a same-origin Referer is accepted. Any other Sec-Fetch-Site value
+    is rejected, including when the Referer matches. No signal at all is
+    rejected. The CSRF token is checked separately and stays mandatory.
+    """
     host = request.headers.get("host", "")
     if not host:
         return False
-    origin = request.headers.get("origin")
-    if origin:
+    origin = _stated_origin(request)
+    if origin is not None:
         parsed = urlsplit(origin)
         return parsed.scheme in {"http", "https"} and parsed.netloc == host
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None:
+        return fetch_site.strip().lower() == "same-origin"
     referer = request.headers.get("referer")
     if not referer:
         return False
@@ -329,7 +350,7 @@ class SecurityGate:
                 headers = MutableHeaders(raw=message["headers"])
                 headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
                 headers["X-Content-Type-Options"] = "nosniff"
-                headers["Referrer-Policy"] = "no-referrer"
+                headers["Referrer-Policy"] = "same-origin"
                 if not str(scope.get("path", "")).startswith("/static/"):
                     headers["Cache-Control"] = "no-store"
             await send(message)  # type: ignore[operator]
@@ -430,13 +451,13 @@ async def setup(request: Request) -> Response:
     username = str(form.get("username") or "").strip()
     password = str(form.get("password") or "")
     confirm = str(form.get("password2") or "")
-    if await context.store.login_is_locked("setup", ip, now):
+    if await context.store.login_is_locked(SETUP_LOCK_SUBJECT, ip, now):
         await verify_password_off_loop(context.hasher, context.dummy_hash, password or "x")
         await context.store.add_audit(username or "unknown", "setup_failure", username or "unknown", {}, now)
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token, errors=["Setup failed."])
     if not constant_equal(supplied, context.setup_token):
-        await context.store.record_failure("setup", ip, now)
+        await context.store.record_failure(SETUP_LOCK_SUBJECT, ip, now)
         await context.store.add_audit(username or "unknown", "setup_failure", username or "unknown", {}, now)
         token = await context.store.create_form_token(now)
         return render(request, "setup.html", title="Setup", csrf=token, errors=["Setup failed."])

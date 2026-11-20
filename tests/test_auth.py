@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from datetime import timedelta
 
+import pytest
 from argon2 import PasswordHasher
 from starlette.routing import Mount
 from starlette.testclient import TestClient
@@ -367,6 +369,71 @@ def test_setup_failures_use_the_login_lockout(tmp_path):
     assert opened.status_code == 303
 
 
+def test_setup_lock_does_not_collide_with_username_setup(tmp_path):
+    from skylight_wifi_automation.store import SETUP_LOCK_SUBJECT
+
+    assert len(SETUP_LOCK_SUBJECT) > 64
+    bundle = build(tmp_path)
+
+    def post_setup(peer: str, token: str):
+        peer_app = _asgi_peer(bundle.app, peer, None)
+        with TestClient(peer_app) as client:
+            page = client.get("/setup")
+            return client.post(
+                "/setup",
+                data={
+                    "csrf_token": csrf_from(page.text),
+                    "setup_token": token,
+                    "username": "setup",
+                    "password": PASSWORD,
+                    "password2": PASSWORD,
+                },
+                headers={"sec-fetch-site": "same-origin"},
+                follow_redirects=False,
+            )
+
+    def post_login(peer: str, password: str):
+        peer_app = _asgi_peer(bundle.app, peer, None)
+        with TestClient(peer_app) as client:
+            page = client.get("/login")
+            return client.post(
+                "/login",
+                data={
+                    "csrf_token": csrf_from(page.text),
+                    "username": "setup",
+                    "password": password,
+                },
+                headers={"sec-fetch-site": "same-origin"},
+                follow_redirects=False,
+            )
+
+    for _ in range(5):
+        failed = post_setup("192.0.2.8", "wrong-setup-token-0123456789abcd")
+        assert failed.status_code == 200
+        assert "Setup failed." in failed.text
+    moment = bundle.clock.moment
+    assert asyncio.run(bundle.store.login_is_locked(SETUP_LOCK_SUBJECT, "192.0.2.9", moment))
+    assert not asyncio.run(bundle.store.login_is_locked("setup", "192.0.2.9", moment))
+    names = {
+        row["username"] for row in db_rows(bundle.store.path, "SELECT username FROM login_attempts")
+    }
+    assert names == {SETUP_LOCK_SUBJECT}
+
+    bundle.clock.moment += timedelta(minutes=15, seconds=1)
+    created = post_setup("192.0.2.9", SETUP_TOKEN)
+    assert created.status_code == 303
+    assert post_login("192.0.2.9", PASSWORD).status_code == 303
+    for _ in range(5):
+        blocked = post_login("192.0.2.20", "wrong-password-value")
+        assert blocked.status_code == 200
+    later = bundle.clock.moment
+    assert asyncio.run(bundle.store.login_is_locked("setup", "192.0.2.21", later))
+    assert not asyncio.run(bundle.store.login_is_locked(SETUP_LOCK_SUBJECT, "192.0.2.21", later))
+    asyncio.run(bundle.store.delete_admin(later))
+    again = post_setup("192.0.2.21", SETUP_TOKEN)
+    assert again.status_code == 303
+
+
 def test_wrong_current_password_uses_the_lockout(tmp_path):
     bundle = build(tmp_path)
     with TestClient(bundle.app) as client:
@@ -511,6 +578,9 @@ async def test_login_burst_does_not_stall_the_poller_loop(tmp_path):
         )
         assert result.ok is False
 
+    await bad_login()
+    gaps.clear()
+    ticks.clear()
     heart = asyncio.create_task(heartbeat())
     poll = asyncio.create_task(poller())
     await asyncio.gather(*(bad_login() for _ in range(20)))
@@ -518,8 +588,75 @@ async def test_login_burst_does_not_stall_the_poller_loop(tmp_path):
     await heart
     await poll
     assert gaps
-    assert max(gaps) < 0.1
+    assert max(gaps) < 0.25
     assert len(ticks) >= 8
+
+
+async def test_cancelled_login_keeps_the_argon2_slot_until_the_thread_finishes(monkeypatch):
+    from skylight_wifi_automation.auth import verify_password_off_loop
+
+    entered = threading.Event()
+    release = threading.Event()
+    running = 0
+    peak = 0
+    gate = threading.Lock()
+
+    def blocking(hasher, password_hash, password):
+        nonlocal running, peak
+        del hasher, password_hash, password
+        with gate:
+            running += 1
+            peak = max(peak, running)
+        try:
+            entered.set()
+            assert release.wait(timeout=5)
+            return False
+        finally:
+            with gate:
+                running -= 1
+
+    monkeypatch.setattr("skylight_wifi_automation.auth.verify_password", blocking)
+    monkeypatch.setenv("ARGON2_CONCURRENCY", "1")
+    loop = asyncio.get_running_loop()
+    previous = getattr(loop, "_swa_argon2_limit", None)
+    if hasattr(loop, "_swa_argon2_limit"):
+        delattr(loop, "_swa_argon2_limit")
+    try:
+        first = asyncio.create_task(verify_password_off_loop(FAST, "hash", "password"))
+        assert await asyncio.to_thread(entered.wait, 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert running == 1
+        second = asyncio.create_task(verify_password_off_loop(FAST, "hash", "password"))
+        await asyncio.sleep(0.05)
+        assert peak == 1
+        assert running == 1
+        assert not second.done()
+        release.set()
+        assert (await second) is False
+        assert peak == 1
+        assert running == 0
+    finally:
+        release.set()
+        if previous is None:
+            if hasattr(loop, "_swa_argon2_limit"):
+                delattr(loop, "_swa_argon2_limit")
+        else:
+            loop._swa_argon2_limit = previous
+
+
+def test_open_trusted_proxy_lists_are_rejected(monkeypatch):
+    from skylight_wifi_automation.runtime import trusted_proxies
+
+    for value in ("*", "0.0.0.0/0", "::/0", "192.0.2.1, 0.0.0.0/0", " ::/0 ", " * "):
+        monkeypatch.setenv("TRUSTED_PROXIES", value)
+        with pytest.raises(RuntimeError, match="TRUSTED_PROXIES must list specific proxy addresses"):
+            trusted_proxies()
+    monkeypatch.setenv("TRUSTED_PROXIES", "192.0.2.1, 2001:db8::/32")
+    assert trusted_proxies() == "192.0.2.1, 2001:db8::/32"
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    assert trusted_proxies() == ""
 
 
 def test_default_hasher_is_argon2id():

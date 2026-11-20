@@ -29,6 +29,9 @@ from skylight_wifi_automation.web import AppContext, create_app
 FAST = PasswordHasher(time_cost=1, memory_cost=64, parallelism=1)
 USERNAME = "admin"
 PASSWORD = "long-enough-pw"
+# Browser forms are not given an Origin header here. Sec-Fetch-Site is the
+# signal a same-origin document sends when Origin is missing or null.
+SAME_SITE = {"sec-fetch-site": "same-origin"}
 ORIGIN = {"origin": "http://testserver"}
 SETUP_TOKEN = "setup-token-value-0123456789abcdef"
 
@@ -179,7 +182,7 @@ def setup_admin(client: TestClient, token: str = SETUP_TOKEN, password: str = PA
             "password": password,
             "password2": password,
         },
-        headers=ORIGIN,
+        headers=SAME_SITE,
         follow_redirects=False,
     )
 
@@ -189,7 +192,7 @@ def login(client: TestClient, password: str = PASSWORD, username: str = USERNAME
     return client.post(
         "/login",
         data={"csrf_token": csrf_from(page.text), "username": username, "password": password},
-        headers=ORIGIN,
+        headers=SAME_SITE,
         follow_redirects=False,
     )
 
