@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from skylight_wifi_automation.config import load_config
 from skylight_wifi_automation.tls import build_ssl_context
 
 
@@ -23,7 +22,7 @@ def _cert(tmp_path: Path, hostname: str) -> tuple[str, Path, Path]:
                 f"CN={hostname}",
                 "[v3]",
                 f"subjectAltName=DNS:{hostname}",
-                "keyUsage=digitalSignature,keyEncipherment",
+                "keyUsage=digitalSignature,keyEncipherment,keyCertSign",
                 "extendedKeyUsage=serverAuth",
             ]
         ),
@@ -90,12 +89,10 @@ def _connect(port: int, pem: str, server_hostname: str) -> None:
 
 
 def test_trust_store_loads_only_the_pinned_cert(tmp_path):
-    pem = load_config("config.example.yaml").unifi_tls_ca
+    pem, cert, _key = _cert(tmp_path, "unifi.local")
     if not pem.endswith("\n"):
         pem += "\n"
-    der_file = tmp_path / "pin.pem"
-    der_file.write_text(pem, encoding="utf-8")
-    der = subprocess.check_output(["openssl", "x509", "-in", str(der_file), "-outform", "DER"])
+    der = subprocess.check_output(["openssl", "x509", "-in", str(cert), "-outform", "DER"])
     context = build_ssl_context(pem)
     stats = context.cert_store_stats()
     assert stats["x509"] == 1

@@ -9,8 +9,9 @@ from .models import ChildDecision, Task
 def past_cutoff(cutoff: time, now: datetime) -> bool:
     """True at or after the child's local cutoff.
 
-    ``now`` must already be in the household timezone. Wall-clock comparison
-    follows America/Chicago through CST and CDT.
+    ``now`` must already be in the configured timezone. Wall-clock comparison
+    follows that zone, America/Chicago by default, through its standard and
+    daylight offsets.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")

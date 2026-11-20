@@ -35,7 +35,7 @@ def _chore(
         status="complete" if complete else "pending",
         completed=complete,
         completed_on=start if complete else None,
-        category_id="cat-lanie",
+        category_id="cat-child-a",
         routine=routine,
         raw={},
     )
@@ -64,7 +64,7 @@ class FakeSkylight:
     async def get_categories(self, frame_id: str) -> list[Any]:
         self._maybe_fail("get_categories")
         assert frame_id == "frame-1"
-        return [SimpleNamespace(id="cat-lanie", label="Lanie")]
+        return [SimpleNamespace(id="cat-child-a", label="Child A")]
 
     async def get_all_chores(self, frame_id: str, **params: Any) -> Any:
         self._maybe_fail("get_all_chores")

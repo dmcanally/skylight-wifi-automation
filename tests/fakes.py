@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from tests.conftest import CLIENT_IP, MAC
+from tests.conftest import CLIENT_IP, DEVICE_NAME, MAC
 
 from skylight_wifi_automation.unifi import UniFiStatus
 
 
 def network_object(
-    name: str = "No Internet - Lanie",
+    name: str = "No Internet - child-a",
     *,
-    object_id: str = "obj-lanie",
+    object_id: str = "obj-child-a",
     enabled: Any = True,
 ) -> dict[str, Any]:
     return {
@@ -18,6 +18,7 @@ def network_object(
         "name": name,
         "enabled": enabled,
         "targets": [{"type": "MAC", "value": MAC}],
+        "hostname": DEVICE_NAME,
         "client_address": CLIENT_IP,
     }
 

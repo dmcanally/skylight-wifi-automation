@@ -5,6 +5,7 @@ from prometheus_client import CollectorRegistry, generate_latest
 from tests.conftest import (
     API_KEY,
     CLIENT_IP,
+    DEVICE_NAME,
     MAC,
     PASSWORD,
     app_config,
@@ -22,7 +23,7 @@ from skylight_wifi_automation.unifi import UnifiClient
 def _task(**overrides):
     values = {
         "id": "1",
-        "profile": "Lanie",
+        "profile": "Child A",
         "summary": "Dishes",
         "complete": False,
         "skipped": False,
@@ -64,7 +65,7 @@ async def test_dry_run_logs_the_toggle_and_never_writes(tmp_path, caplog):
     )
     await service.poll()
     assert api.writes() == []
-    assert "Lanie" in (tmp_path / "latch.json").read_text(encoding="utf-8")
+    assert "child-a" in (tmp_path / "latch.json").read_text(encoding="utf-8")
     assert "unlock=True" in caplog.text
     assert "lock=False" in caplog.text
     assert "action=pause" in caplog.text
@@ -76,6 +77,7 @@ async def test_dry_run_logs_the_toggle_and_never_writes(tmp_path, caplog):
     assert PASSWORD not in caplog.text
     assert MAC not in caplog.text
     assert CLIENT_IP not in caplog.text
+    assert DEVICE_NAME not in caplog.text
 
 
 async def test_idempotent_read_does_not_write_when_state_matches(tmp_path):
@@ -101,7 +103,7 @@ async def test_pause_and_resume_put_only_the_enabled_flag(tmp_path):
     writes = api.writes()
     assert len(writes) == 1
     assert writes[0]["method"] == "PUT"
-    assert writes[0]["url"].endswith("/object-oriented-network-config/obj-lanie")
+    assert writes[0]["url"].endswith("/object-oriented-network-config/obj-child-a")
     assert "firewall" not in writes[0]["url"]
     assert writes[0]["body"]["enabled"] is False
     assert writes[0]["body"]["targets"] == [{"type": "MAC", "value": MAC}]
@@ -290,15 +292,15 @@ async def test_missing_name_skips_that_child_only(tmp_path):
     )
     metrics = Metrics(CollectorRegistry())
     service = AutomationService(
-        app_config(children=[child("Lanie"), child("Libby")]),
-        Skylight([_task(complete=True), _task(id="2", profile="Libby", complete=True)]),
+        app_config(children=[child("child-a"), child("child-b")]),
+        Skylight([_task(complete=True), _task(id="2", profile="Child B", complete=True)]),
         unifi,
         metrics,
         clock=lambda: chicago(2026, 8, 24, 18),
         latch_path=tmp_path / "latch.json",
     )
     await service.poll()
-    assert [call["url"].rsplit("/", 1)[-1] for call in api.writes()] == ["obj-lanie"]
+    assert [call["url"].rsplit("/", 1)[-1] for call in api.writes()] == ["obj-child-a"]
     assert "wifi_automation_poll_failures_total 1.0" in generate_latest(metrics._registry).decode()
 
     api.fail = "sites"
@@ -311,7 +313,7 @@ async def test_zero_or_duplicate_name_writes_nothing(tmp_path, caplog):
     zero, zero_api, zero_metrics = _build(
         tmp_path,
         [_task(complete=True)],
-        [network_object(name="no internet - lanie", object_id="obj-case")],
+        [network_object(name="no internet - child-a", object_id="obj-case")],
         chicago(2026, 8, 24, 18),
     )
     await zero.poll()
@@ -348,7 +350,7 @@ async def test_read_before_write_uses_the_fresh_object(tmp_path):
     )
     api.fresh_stamp = 2
     await service.poll()
-    singular = [call["method"] for call in api.calls if call["url"].endswith("/obj-lanie")]
+    singular = [call["method"] for call in api.calls if call["url"].endswith("/obj-child-a")]
     assert singular == ["GET", "PUT", "GET"]
     body = api.writes()[0]["body"]
     assert body["enabled"] is False
@@ -367,7 +369,7 @@ async def test_verify_after_write_mismatch_is_not_retried(tmp_path):
     api.confirm_mismatch = True
     await service.poll()
     assert len(api.writes()) == 1
-    assert [call["method"] for call in api.calls if call["url"].endswith("/obj-lanie")] == [
+    assert [call["method"] for call in api.calls if call["url"].endswith("/obj-child-a")] == [
         "GET",
         "PUT",
         "GET",
@@ -478,6 +480,7 @@ async def test_info_logs_do_not_include_the_object_body(tmp_path, caplog):
         assert "BODY-MARKER-9f3a" not in text
         assert MAC not in text
         assert CLIENT_IP not in text
+        assert DEVICE_NAME not in text
         assert "targets" not in text
         assert API_KEY not in text
     assert "unlock=True" in info
@@ -488,7 +491,7 @@ async def test_write_failure_stops_later_children(tmp_path):
     api = UniFiAPI(
         [
             network_object(enabled=True),
-            network_object(name="No Internet - Libby", object_id="obj-libby", enabled=True),
+            network_object(name="No Internet - child-b", object_id="obj-child-b", enabled=True),
         ],
         fail="write",
     )
@@ -499,8 +502,8 @@ async def test_write_failure_stops_later_children(tmp_path):
         requester=api,
     )
     service = AutomationService(
-        app_config(children=[child("Lanie"), child("Libby")]),
-        Skylight([_task(complete=True), _task(id="2", profile="Libby", complete=True)]),
+        app_config(children=[child("child-a"), child("child-b")]),
+        Skylight([_task(complete=True), _task(id="2", profile="Child B", complete=True)]),
         unifi,
         Metrics(CollectorRegistry()),
         clock=lambda: chicago(2026, 8, 24, 18),
@@ -508,7 +511,7 @@ async def test_write_failure_stops_later_children(tmp_path):
     )
     await service.poll()
     assert len(api.writes()) == 1
-    assert api.writes()[0]["url"].endswith("/obj-lanie")
+    assert api.writes()[0]["url"].endswith("/obj-child-a")
 
 
 async def test_object_lookup_follows_pages(tmp_path):
