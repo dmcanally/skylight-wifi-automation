@@ -7,7 +7,7 @@ import os
 import sqlite3
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
@@ -49,25 +49,53 @@ SETTING_KEYS = (
 IMPORT_KEY = "imported_yaml_sha256"
 LOCK_WINDOW = timedelta(minutes=15)
 IDLE_TIMEOUT = timedelta(hours=12)
-ABSOLUTE_SESSION = timedelta(days=7)
+SHORT_SESSION = timedelta(hours=12)
+REMEMBER_SESSION = timedelta(days=30)
+REMEMBER_MAX = timedelta(days=90)
+LEGACY_SESSION = timedelta(days=7)
+TOUCH_AFTER = timedelta(minutes=15)
+SCHEMA_VERSION = 2
+
+
+def username_key(value: str) -> str:
+    return value.strip().casefold()
+
+
+def cookie_max_age(remember: bool, now: datetime, cap_at: datetime | None = None) -> int | None:
+    """Max-Age for a remember-me cookie, clipped so it cannot outlive the absolute cap."""
+    if not remember:
+        return None
+    moment = now.astimezone(UTC)
+    anchor = (cap_at or moment).astimezone(UTC)
+    deadline = min(moment + REMEMBER_SESSION, anchor + REMEMBER_MAX)
+    return max(0, int((deadline - moment).total_seconds()))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS admin (
+CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
+    username_key TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at TEXT NOT NULL,
     failed_count INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
+    public_id TEXT NOT NULL UNIQUE,
     csrf TEXT NOT NULL,
     username TEXT NOT NULL,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    last_seen TEXT NOT NULL
+    last_seen TEXT NOT NULL,
+    remember INTEGER NOT NULL DEFAULT 0,
+    user_agent TEXT NOT NULL DEFAULT '',
+    legacy INTEGER NOT NULL DEFAULT 0,
+    cap_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS login_attempts (
     id INTEGER PRIMARY KEY,
@@ -135,6 +163,10 @@ SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM config_version WHERE id = 1);
 """
 
 
+class LastAdminError(ValueError):
+    """Refusing a change that would leave no active admin."""
+
+
 class ConfigWriteError(ValueError):
     def __init__(self, errors: list[str]) -> None:
         super().__init__(errors[0] if errors else "invalid configuration")
@@ -147,9 +179,23 @@ class Admin:
     password_hash: str
     failed_count: int
     locked_until: datetime | None
+    role: str = "admin"
+    disabled: bool = False
 
     def __repr__(self) -> str:
-        return f"Admin(username={self.username!r}, failed_count={self.failed_count})"
+        return f"Admin(username={self.username!r}, role={self.role!r}, failed_count={self.failed_count})"
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    id: str
+    username: str
+    created_at: datetime
+    last_seen: datetime
+    expires_at: datetime
+    user_agent: str
+    current: bool
+    remember: bool
 
 
 @dataclass(frozen=True)
@@ -160,6 +206,9 @@ class Session:
     created_at: datetime
     expires_at: datetime
     last_seen: datetime
+    role: str = "admin"
+    refresh_cookie: bool = False
+    cookie_max_age: int | None = None
 
     def __repr__(self) -> str:
         return f"Session(username={self.username!r})"
@@ -243,9 +292,12 @@ def _private_mode(path: Path) -> None:
 class Store:
     """SQLite in WAL mode. Public methods run the work via asyncio.to_thread."""
 
-    def __init__(self, path: Path, key: bytes | None) -> None:
+    def __init__(
+        self, path: Path, key: bytes | None, clock: Callable[[], datetime] | None = None
+    ) -> None:
         self.path = path
         self._key = key
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.encryption_enabled = key is not None
         _require_writable_dir(path.parent)
         previous = os.umask(0o077)
@@ -288,10 +340,144 @@ class Store:
             if exists is not None:
                 row = self._conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
                 current = int(row[0] or 0)
-            if current >= 1:
+            if current < 1:
+                self._conn.executescript(SCHEMA)
+                self._conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
                 return
-            self._conn.executescript(SCHEMA)
-            self._conn.execute("INSERT INTO schema_version(version) VALUES (1)")
+            if current < SCHEMA_VERSION:
+                self._backup_database()
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._migrate_v2(self._conn)
+                    self._conn.execute("COMMIT")
+                except Exception:
+                    self._conn.execute("ROLLBACK")
+                    raise
+
+    def _backup_database(self) -> None:
+        """Copy app.db to a new 0600 file. A same-second name that already exists is kept."""
+        checkpoint = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint is None or int(checkpoint[0]) != 0:
+            raise RuntimeError("database checkpoint failed; refusing to migrate without a backup")
+        stamp = self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        previous = os.umask(0o077)
+        dest: Path | None = None
+        try:
+            dest = self._create_backup_file(stamp)
+            target = sqlite3.connect(dest)
+            try:
+                self._conn.backup(target)
+            finally:
+                target.close()
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{dest}{suffix}")
+                if sidecar.exists():
+                    sidecar.unlink()
+            if dest.stat().st_mode & 0o777 != 0o600:
+                raise RuntimeError("migration backup was not created with mode 0600")
+        except Exception:
+            if dest is not None and dest.exists():
+                dest.unlink()
+            raise
+        finally:
+            os.umask(previous)
+        kept = f"{self.path.name}.bak-{stamp}"
+        for old in self.path.parent.glob(f"{self.path.name}.bak-*"):
+            if old.name == kept or old.name.startswith(f"{kept}-"):
+                continue
+            old.unlink()
+
+    def _create_backup_file(self, stamp: str) -> Path:
+        """Create a new 0600 backup path. An existing same-second file is left in place."""
+        number = 0
+        while True:
+            suffix = "" if number == 0 else f"-{number}"
+            dest = self.path.parent / f"{self.path.name}.bak-{stamp}{suffix}"
+            if dest.exists():
+                number += 1
+                continue
+            try:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            except FileExistsError:
+                number += 1
+                continue
+            os.close(fd)
+            return dest
+
+    def _column_names(self, conn: sqlite3.Connection, table: str) -> set[str]:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate_v2(self, conn: sqlite3.Connection) -> None:
+        """Copy the single admin account into users. Safe to run once per database."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                username_key TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+                disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+                created_at TEXT NOT NULL,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT
+            )"""
+        )
+        admin_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin'"
+        ).fetchone()
+        if admin_exists is not None:
+            created = dump_dt(self._clock())
+            seen: set[str] = set()
+            rows = conn.execute(
+                "SELECT username, password_hash, failed_count, locked_until FROM admin"
+            ).fetchall()
+            for row in rows:
+                key = username_key(str(row["username"]))
+                if not key or key in seen:
+                    raise RuntimeError(
+                        "migration refused: admin usernames collide when case is ignored"
+                    )
+                seen.add(key)
+                conn.execute(
+                    """INSERT OR IGNORE INTO users(
+                           username, username_key, password_hash, role, disabled,
+                           created_at, failed_count, locked_until
+                       ) VALUES (?, ?, ?, 'admin', 0, ?, ?, ?)""",
+                    (
+                        row["username"],
+                        key,
+                        row["password_hash"],
+                        created,
+                        row["failed_count"],
+                        row["locked_until"],
+                    ),
+                )
+            conn.execute("DROP TABLE admin")
+        columns = self._column_names(conn, "sessions")
+        if "remember" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 0")
+        if "user_agent" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''")
+        if "public_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN public_id TEXT")
+        missing = conn.execute(
+            "SELECT rowid FROM sessions WHERE public_id IS NULL OR public_id = ''"
+        ).fetchall()
+        for item in missing:
+            conn.execute(
+                "UPDATE sessions SET public_id = ? WHERE rowid = ?",
+                (new_token(), int(item[0])),
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS sessions_public_id ON sessions(public_id)"
+        )
+        session_columns = self._column_names(conn, "sessions")
+        if "legacy" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0")
+        if "cap_at" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN cap_at TEXT NOT NULL DEFAULT ''")
+        # v1 sessions lived 7 days from creation and their cookies already have that Max-Age.
+        conn.execute("UPDATE sessions SET legacy = 1, cap_at = created_at")
+        conn.execute("INSERT INTO schema_version(version) VALUES (2)")
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -352,48 +538,181 @@ class Store:
             row = self._conn.execute("SELECT version FROM config_version WHERE id = 1").fetchone()
             return int(row[0])
 
-    def _admin_from(self, row: sqlite3.Row | None) -> Admin | None:
+    def _user_from(self, row: sqlite3.Row | None) -> Admin | None:
         if row is None:
             return None
         locked = load_dt(row["locked_until"]) if row["locked_until"] else None
-        return Admin(row["username"], row["password_hash"], int(row["failed_count"]), locked)
+        return Admin(
+            row["username"],
+            row["password_hash"],
+            int(row["failed_count"]),
+            locked,
+            str(row["role"]),
+            bool(row["disabled"]),
+        )
+
+    def _find_user(self, conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT * FROM users WHERE username_key = ?",
+            (username_key(username),),
+        ).fetchone()
+
+    def _get_user(self, username: str) -> Admin | None:
+        with self._lock:
+            return self._user_from(self._find_user(self._conn, username))
 
     def _get_admin(self) -> Admin | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT username, password_hash, failed_count, locked_until FROM admin LIMIT 1"
+                """SELECT * FROM users WHERE role = 'admin'
+                   ORDER BY disabled, created_at LIMIT 1"""
             ).fetchone()
-            return self._admin_from(row)
+            return self._user_from(row)
+
+    def _list_users(self) -> list[Admin]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM users ORDER BY role, username").fetchall()
+        found: list[Admin] = []
+        for row in rows:
+            user = self._user_from(row)
+            if user is not None:
+                found.append(user)
+        return found
+
+    def _active_admin_count(self, conn: sqlite3.Connection) -> int:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0"
+            ).fetchone()[0]
+        )
+
+    def _guard_last_admin(
+        self,
+        conn: sqlite3.Connection,
+        username: str,
+        *,
+        delete: bool = False,
+        disable: bool = False,
+        role: str | None = None,
+    ) -> sqlite3.Row:
+        row = self._find_user(conn, username)
+        if row is None:
+            raise KeyError(username)
+        active = row["role"] == "admin" and int(row["disabled"]) == 0
+        removes = delete or disable or (role is not None and role != "admin")
+        if active and removes and self._active_admin_count(conn) <= 1:
+            raise LastAdminError("At least one active admin is required.")
+        return row
 
     def _create_admin(self, username: str, password_hash: str, now: datetime) -> None:
         with self._tx() as conn:
-            if conn.execute("SELECT 1 FROM admin LIMIT 1").fetchone() is not None:
+            if conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is not None:
                 raise ConfigWriteError(["An admin already exists."])
-            conn.execute(
-                """INSERT INTO admin(username, password_hash, failed_count, locked_until)
-                   VALUES (?, ?, 0, NULL)""",
-                (username, password_hash),
-            )
+            if self._find_user(conn, username) is not None:
+                raise ConfigWriteError(["That username is already in use."])
+            try:
+                conn.execute(
+                    """INSERT INTO users(
+                           username, username_key, password_hash, role, disabled, created_at,
+                           failed_count, locked_until
+                       ) VALUES (?, ?, ?, 'admin', 0, ?, 0, NULL)""",
+                    (username, username_key(username), password_hash, dump_dt(now)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigWriteError(["That username is already in use."]) from exc
             self._audit(conn, username, "setup", username, {}, now)
+
+    def _create_user(
+        self, actor: str, now: datetime, username: str, password_hash: str, role: str
+    ) -> None:
+        if role not in {"admin", "member"}:
+            raise ConfigWriteError(["role: choose admin or member"])
+        with self._tx() as conn:
+            if self._find_user(conn, username) is not None:
+                raise ConfigWriteError(["That username is already in use."])
+            try:
+                conn.execute(
+                    """INSERT INTO users(
+                           username, username_key, password_hash, role, disabled, created_at,
+                           failed_count, locked_until
+                       ) VALUES (?, ?, ?, ?, 0, ?, 0, NULL)""",
+                    (username, username_key(username), password_hash, role, dump_dt(now)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConfigWriteError(["That username is already in use."]) from exc
+            self._audit(conn, actor, "user_created", username, {"role": role}, now)
+
+    def _set_role(self, username: str, role: str, actor: str, now: datetime) -> None:
+        if role not in {"admin", "member"}:
+            raise ConfigWriteError(["role: choose admin or member"])
+        with self._tx() as conn:
+            row = self._guard_last_admin(conn, username, role=role)
+            conn.execute("UPDATE users SET role = ? WHERE username = ?", (role, row["username"]))
+            self._audit(conn, actor, "user_role", row["username"], {"role": role}, now)
+
+    def _set_disabled(self, username: str, disabled: bool, actor: str, now: datetime) -> None:
+        with self._tx() as conn:
+            row = self._guard_last_admin(conn, username, disable=disabled)
+            conn.execute(
+                "UPDATE users SET disabled = ? WHERE username = ?",
+                (1 if disabled else 0, row["username"]),
+            )
+            if disabled:
+                conn.execute("DELETE FROM sessions WHERE username = ?", (row["username"],))
+            self._audit(
+                conn,
+                actor,
+                "user_disabled" if disabled else "user_enabled",
+                row["username"],
+                {"disabled": disabled},
+                now,
+            )
+
+    def _delete_user(self, username: str, actor: str, now: datetime) -> None:
+        with self._tx() as conn:
+            row = self._guard_last_admin(conn, username, delete=True)
+            conn.execute("DELETE FROM sessions WHERE username = ?", (row["username"],))
+            conn.execute("DELETE FROM users WHERE username = ?", (row["username"],))
+            self._audit(conn, actor, "user_deleted", row["username"], {}, now)
 
     def _set_password(self, username: str, password_hash: str, now: datetime) -> None:
         with self._tx() as conn:
+            row = self._find_user(conn, username)
+            if row is None:
+                raise KeyError(username)
+            canonical = str(row["username"])
             conn.execute(
-                """UPDATE admin SET password_hash = ?, failed_count = 0, locked_until = NULL
+                """UPDATE users SET password_hash = ?, failed_count = 0, locked_until = NULL
                    WHERE username = ?""",
-                (password_hash, username),
+                (password_hash, canonical),
             )
-            self._audit(conn, username, "password_changed", username, {"password": "updated"}, now)
+            conn.execute("DELETE FROM sessions WHERE username = ?", (canonical,))
+            self._audit(conn, canonical, "password_changed", canonical, {"password": "updated"}, now)
+
+    def _reset_password(self, actor: str, username: str, password_hash: str, now: datetime) -> None:
+        with self._tx() as conn:
+            row = self._find_user(conn, username)
+            if row is None:
+                raise KeyError(username)
+            canonical = str(row["username"])
+            conn.execute(
+                """UPDATE users SET password_hash = ?, failed_count = 0, locked_until = NULL
+                   WHERE username = ?""",
+                (password_hash, canonical),
+            )
+            conn.execute("DELETE FROM sessions WHERE username = ?", (canonical,))
+            self._audit(conn, actor, "password_reset", canonical, {"password": "updated"}, now)
 
     def _delete_admin(self, now: datetime) -> bool:
         with self._tx() as conn:
-            row = conn.execute("SELECT username FROM admin LIMIT 1").fetchone()
-            conn.execute("DELETE FROM sessions")
-            conn.execute("DELETE FROM admin")
-            if row is None:
+            rows = conn.execute("SELECT username FROM users WHERE role = 'admin'").fetchall()
+            if not rows:
                 self._audit(conn, "cli", "reset_admin", "none", {"result": "empty"}, now)
                 return False
-            self._audit(conn, "cli", "reset_admin", row["username"], {}, now)
+            for row in rows:
+                conn.execute("DELETE FROM sessions WHERE username = ?", (row["username"],))
+                conn.execute("DELETE FROM users WHERE username = ?", (row["username"],))
+                self._audit(conn, "cli", "reset_admin", row["username"], {}, now)
             return True
 
     def _prune_attempts(self, conn: sqlite3.Connection, now: datetime) -> None:
@@ -408,11 +727,11 @@ class Store:
     def _login_is_locked(self, username: str, ip: str, now: datetime) -> bool:
         moment = now.astimezone(UTC)
         with self._lock:
-            admin = self._conn.execute(
-                "SELECT locked_until FROM admin WHERE username = ?",
-                (username,),
+            account = self._conn.execute(
+                "SELECT locked_until FROM users WHERE username_key = ?",
+                (username_key(username),),
             ).fetchone()
-            if admin is not None and admin["locked_until"] and load_dt(admin["locked_until"]) > moment:
+            if account is not None and account["locked_until"] and load_dt(account["locked_until"]) > moment:
                 return True
             rows = self._conn.execute(
                 """SELECT username, ip, lock_kind, locked_until FROM login_attempts
@@ -467,61 +786,91 @@ class Store:
                     "UPDATE login_attempts SET lock_kind = ?, locked_until = ? WHERE id = ?",
                     (kind, until, attempt_id),
                 )
-            admin = conn.execute(
-                "SELECT username FROM admin WHERE username = ?",
-                (username,),
-            ).fetchone()
-            if admin is not None:
+            account = self._find_user(conn, username)
+            if account is not None:
+                canonical = str(account["username"])
                 if user_locked:
                     conn.execute(
-                        "UPDATE admin SET failed_count = ?, locked_until = ? WHERE username = ?",
-                        (user_count, dump_dt(now + LOCK_WINDOW), username),
+                        "UPDATE users SET failed_count = ?, locked_until = ? WHERE username = ?",
+                        (user_count, dump_dt(now + LOCK_WINDOW), canonical),
                     )
                 else:
                     conn.execute(
-                        "UPDATE admin SET failed_count = ? WHERE username = ?",
-                        (user_count, username),
+                        "UPDATE users SET failed_count = ? WHERE username = ?",
+                        (user_count, canonical),
                     )
             return kind is not None
 
     def _clear_failures(self, username: str, ip: str) -> None:
         with self._tx() as conn:
             conn.execute(
-                "UPDATE admin SET failed_count = 0, locked_until = NULL WHERE username = ?",
-                (username,),
+                "UPDATE users SET failed_count = 0, locked_until = NULL WHERE username_key = ?",
+                (username_key(username),),
             )
             conn.execute(
-                "DELETE FROM login_attempts WHERE username = ? OR ip = ?",
-                (username, ip),
+                "DELETE FROM login_attempts WHERE username = ? OR username = ? OR ip = ?",
+                (username, username_key(username), ip),
             )
 
-    def _create_session(self, username: str, now: datetime) -> tuple[str, str]:
+    def _prune_sessions(self, conn: sqlite3.Connection, now: datetime) -> None:
+        moment = now.astimezone(UTC)
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (dump_dt(moment),))
+        conn.execute(
+            "DELETE FROM sessions WHERE remember = 0 AND last_seen <= ?",
+            (dump_dt(moment - IDLE_TIMEOUT),),
+        )
+
+    def _create_session(
+        self,
+        username: str,
+        now: datetime,
+        remember: bool = False,
+        user_agent: str = "",
+        cap_at: datetime | None = None,
+    ) -> tuple[str, str]:
         token = new_token()
         csrf = new_token()
+        moment = now.astimezone(UTC)
+        anchor = (cap_at or moment).astimezone(UTC)
+        lifetime = REMEMBER_SESSION if remember else SHORT_SESSION
+        cap = anchor + (REMEMBER_MAX if remember else SHORT_SESSION)
+        expires = min(moment + lifetime, cap)
         with self._tx() as conn:
+            self._prune_sessions(conn, now)
             conn.execute(
-                """INSERT INTO sessions(token_hash, csrf, username, created_at, expires_at, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO sessions(
+                       token_hash, public_id, csrf, username, created_at, expires_at, last_seen,
+                       remember, user_agent, legacy, cap_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
                 (
                     hash_token(token),
+                    new_token(),
                     csrf,
                     username,
-                    dump_dt(now),
-                    dump_dt(now + ABSOLUTE_SESSION),
-                    dump_dt(now),
+                    dump_dt(moment),
+                    dump_dt(expires),
+                    dump_dt(moment),
+                    1 if remember else 0,
+                    str(user_agent or "")[:80],
+                    dump_dt(anchor),
                 ),
             )
         return token, csrf
 
-    def _session_from(self, row: sqlite3.Row, seen: datetime) -> Session:
-        return Session(
-            row["token_hash"],
-            row["csrf"],
-            row["username"],
-            load_dt(row["created_at"]),
-            load_dt(row["expires_at"]),
-            seen,
-        )
+    def _session_hints(self, token: str) -> tuple[bool, str, datetime | None]:
+        """Remember flag, user agent, and this session's own absolute-cap anchor."""
+        if not token:
+            return False, "", None
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT remember, user_agent, cap_at, created_at
+                   FROM sessions WHERE token_hash = ?""",
+                (hash_token(token),),
+            ).fetchone()
+        if row is None:
+            return False, "", None
+        anchor = load_dt(row["cap_at"]) if row["cap_at"] else load_dt(row["created_at"])
+        return bool(row["remember"]), str(row["user_agent"] or ""), anchor
 
     def _use_session(self, token: str, now: datetime) -> Session | None:
         if not token:
@@ -532,16 +881,99 @@ class Store:
             row = conn.execute("SELECT * FROM sessions WHERE token_hash = ?", (digest,)).fetchone()
             if row is None:
                 return None
+            account = conn.execute(
+                "SELECT role, disabled FROM users WHERE username = ?",
+                (row["username"],),
+            ).fetchone()
             expires = load_dt(row["expires_at"])
             seen = load_dt(row["last_seen"])
-            if moment >= expires or moment - seen >= IDLE_TIMEOUT:
+            created = load_dt(row["created_at"])
+            remember = bool(row["remember"])
+            legacy = bool(row["legacy"])
+            anchor = load_dt(row["cap_at"]) if row["cap_at"] else created
+            if legacy:
+                # v1 measured 7 days from creation and did not refresh the cookie.
+                cap = anchor + LEGACY_SESSION
+            elif remember:
+                cap = anchor + REMEMBER_MAX
+            else:
+                cap = anchor + SHORT_SESSION
+            idle_hit = (not remember) and moment - seen >= IDLE_TIMEOUT
+            if (
+                account is None
+                or int(account["disabled"]) == 1
+                or moment >= expires
+                or moment >= cap
+                or idle_hit
+            ):
                 conn.execute("DELETE FROM sessions WHERE token_hash = ?", (digest,))
                 return None
-            conn.execute(
-                "UPDATE sessions SET last_seen = ? WHERE token_hash = ?",
-                (dump_dt(moment), digest),
+            refresh = False
+            max_age: int | None = None
+            if remember and moment - seen >= TOUCH_AFTER:
+                new_expires = min(moment + REMEMBER_SESSION, cap)
+                max_age = max(0, int((new_expires - moment).total_seconds()))
+                conn.execute(
+                    "UPDATE sessions SET last_seen = ?, expires_at = ? WHERE token_hash = ?",
+                    (dump_dt(moment), dump_dt(new_expires), digest),
+                )
+                refresh = True
+            elif not remember and moment - seen >= TOUCH_AFTER:
+                conn.execute(
+                    "UPDATE sessions SET last_seen = ? WHERE token_hash = ?",
+                    (dump_dt(moment), digest),
+                )
+            return Session(
+                row["token_hash"],
+                row["csrf"],
+                row["username"],
+                created,
+                expires,
+                moment if moment - seen >= TOUCH_AFTER else seen,
+                str(account["role"]),
+                refresh,
+                max_age,
             )
-            return self._session_from(row, moment)
+
+    def _list_sessions(self, current_token: str, username: str | None) -> list[SessionInfo]:
+        digest = hash_token(current_token) if current_token else ""
+        sql = """SELECT public_id AS id, username, created_at, last_seen, expires_at,
+                        user_agent, remember, token_hash
+                 FROM sessions"""
+        params: tuple[object, ...] = ()
+        if username is not None:
+            sql += " WHERE username = ?"
+            params = (username,)
+        sql += " ORDER BY last_seen DESC, rowid DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            SessionInfo(
+                str(row["id"]),
+                row["username"],
+                load_dt(row["created_at"]),
+                load_dt(row["last_seen"]),
+                load_dt(row["expires_at"]),
+                row["user_agent"] or "Browser on Unknown",
+                row["token_hash"] == digest,
+                bool(row["remember"]),
+            )
+            for row in rows
+        ]
+
+    def _revoke_session(
+        self, session_id: str, actor: str, now: datetime, *, username: str, admin: bool
+    ) -> str:
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT public_id, username FROM sessions WHERE public_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None or (not admin and row["username"] != username):
+                raise KeyError(session_id)
+            conn.execute("DELETE FROM sessions WHERE public_id = ?", (session_id,))
+            self._audit(conn, actor, "session_revoked", row["username"], {}, now)
+            return str(row["username"])
 
     def _delete_session(self, token: str) -> None:
         if not token:
@@ -1221,10 +1653,18 @@ def _row_dict(row: sqlite3.Row) -> dict[str, object]:
 
 
 _ASYNC_METHODS = (
+    "_get_user",
     "_get_admin",
+    "_list_users",
     "_create_admin",
+    "_create_user",
+    "_set_role",
+    "_set_disabled",
+    "_delete_user",
     "_set_password",
+    "_reset_password",
     "_delete_admin",
+    "_session_hints",
     "_login_is_locked",
     "_record_failure",
     "_clear_failures",
@@ -1232,6 +1672,8 @@ _ASYNC_METHODS = (
     "_use_session",
     "_delete_session",
     "_delete_user_sessions",
+    "_list_sessions",
+    "_revoke_session",
     "_create_form_token",
     "_consume_form_token",
     "_is_imported",

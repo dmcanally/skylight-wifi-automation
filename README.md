@@ -81,6 +81,23 @@ overrides.
    still works directly, and it returns 404 once the admin exists.
 5. Unset `ADMIN_SETUP_TOKEN` and sign in.
 
+An admin can add members and other admins from Users. A member can view the
+dashboard and set block or unblock overrides. Members cannot open secrets,
+users, or the schedule. The last active admin cannot be removed, disabled, or
+demoted. Sign-in lockout stays per account and per client address.
+
+Sessions live in the SQLite file on `DATA_DIR`, so a pod restart keeps them.
+The cookie value is stored only as a hash. Remember me keeps a session for 30
+days, renewed on use, and never past 90 days from when it was created. The
+browser cookie for that choice has a 30-day Max-Age and is sent again when
+the window moves. Without remember me, the session lasts 12 hours and the
+cookie is a browser session cookie. Sessions shows created time, last seen,
+and a coarse browser label. A user can revoke their own. An admin can revoke
+anyone's. Changing a password revokes every session for that account and
+signs the browser that made the change into a new session. That new session
+keeps the original absolute cap, so a password change does not extend the 90
+days. Disabling or deleting an account revokes all of its sessions.
+
 Empty secret fields are left unchanged. Clear removes the database copy and
 the environment variable is used again. A value is shown only as set or not
 set, with its source (`db` or `env`) and, for a database value, when it was
@@ -110,12 +127,25 @@ sending the header.
 Liveness and readiness probes should use `GET :8000/healthz`. The image
 health check uses that URL. Prometheus stays on `:8080/metrics`.
 
-`skylight-wifi reset-admin` deletes the admin and its sessions so `/setup`
-can be used again. From a shell in the container:
+`skylight-wifi reset-admin` deletes admin accounts and their sessions so
+`/setup` can create an admin again. Member accounts and their sessions stay.
+From a shell in the container:
 
 ```bash
 skylight-wifi reset-admin
 ```
+
+### Upgrading
+
+Back up `/data/app.db` before upgrading. Release 0.4.x migrates that database
+in place. 0.3.0 and 0.3.1 cannot read a migrated database. Before it migrates,
+the process writes one copy beside the database, `app.db.bak-<timestamp>`,
+mode `0600` from the moment the file is created, and keeps only the latest
+copy. Sessions that already exist keep their original 7-day lifetime, and
+their cookies stay 7-day cookies. To roll back, stop the pod first. Delete
+`app.db-wal` and `app.db-shm`, then copy the backup over `app.db`, and start
+the 0.3.1 image. Pin the image by digest so a rollout cannot downgrade onto
+a migrated database.
 
 ### Rotating the encryption key
 

@@ -109,7 +109,7 @@ def build(
     yaml_path = tmp_path / "config.yaml"
     write_yaml(yaml_path, dry_run=dry_run, manual=manual, cutoff=cutoff)
     clock = Clock(moment or chicago(2026, 8, 24, 18))
-    store = Store(tmp_path / "app.db", secret_key)
+    store = Store(tmp_path / "app.db", secret_key, clock)
     api = UniFiAPI([network_object(enabled=enabled)])
     sky = Skylight([])
 

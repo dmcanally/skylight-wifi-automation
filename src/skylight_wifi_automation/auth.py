@@ -90,20 +90,23 @@ async def attempt_login(
 ) -> LoginResult:
     """Check a password. Hashing runs off the poller loop. The password is never logged."""
     safe_name = (username or "").strip()[:64] or "unknown"
+    lock_name = safe_name.casefold()
     safe_ip = (ip or "unknown")[:64]
-    if await store.login_is_locked(safe_name, safe_ip, now):
+    if await store.login_is_locked(lock_name, safe_ip, now):
         await verify_password_off_loop(hasher, dummy_hash, password or "x")
-        return LoginResult(False, True, safe_name)
-    admin = await store.get_admin()
-    if admin is not None and admin.username == safe_name and password:
-        ok = await verify_password_off_loop(hasher, admin.password_hash, password)
-        canonical = admin.username
+        return LoginResult(False, True, lock_name)
+    account = await store.get_user(safe_name)
+    if account is not None and password:
+        ok = await verify_password_off_loop(hasher, account.password_hash, password)
+        canonical = account.username
+        if account.disabled:
+            ok = False
     else:
         await verify_password_off_loop(hasher, dummy_hash, password or "x")
         ok = False
-        canonical = safe_name
+        canonical = lock_name
     if ok:
         await store.clear_failures(canonical, safe_ip)
         return LoginResult(True, False, canonical)
-    locked = await store.record_failure(safe_name, safe_ip, now)
-    return LoginResult(False, locked, safe_name)
+    locked = await store.record_failure(lock_name, safe_ip, now)
+    return LoginResult(False, locked, canonical)
