@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Online backup of the Skylight Wi-Fi Automation SQLite database.
 
 The source database stays in place. This process opens it, copies it with the
