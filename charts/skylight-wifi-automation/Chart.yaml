@@ -1,0 +1,18 @@
+apiVersion: v2
+name: skylight-wifi-automation
+description: Deploy Skylight Wi-Fi Automation on Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.4.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - skylight
+  - unifi
+  - wifi
+home: https://github.com/dmcanally/skylight-wifi-automation
+sources:
+  - https://github.com/dmcanally/skylight-wifi-automation
+annotations:
+  artifacthub.io/recommendations: |
+    - Read the chart README before installing. The default config is dry-run and the certificate placeholder is rejected until you replace it.
+    - Create APP_ENCRYPTION_KEY yourself and point secrets.existingSecret at it.

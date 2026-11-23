@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skylight-wifi-automation.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ include "skylight-wifi-automation.configFile" . }}: |
+{{ include "skylight-wifi-automation.configYaml" . | indent 4 }}

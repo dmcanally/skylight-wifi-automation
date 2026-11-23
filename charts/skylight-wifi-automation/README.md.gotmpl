@@ -1,0 +1,113 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.versionBadge" . }}{{ template "chart.typeBadge" . }}{{ template "chart.appVersionBadge" . }}
+
+![Kubernetes](https://img.shields.io/badge/kubernetes-%3E%3D1.25.0-326ce5)
+
+This chart runs one copy of [Skylight Wi-Fi Automation]({{ .Home }}). The process pauses or resumes UniFi Object Manager objects from Skylight task completion. It serves a web UI, stores configuration and sessions in SQLite, and exposes Prometheus metrics.
+
+The Deployment is **one replica** with strategy **Recreate**. SQLite on the data volume has a single writer. A second pod, including one started by a rolling update, can corrupt `app.db`. That is fixed in the template and is not a value.
+
+## What the chart creates
+
+| Resource | When |
+| --- | --- |
+| Deployment, UI Service, metrics Service, ConfigMap, ServiceAccount | Always |
+| PersistentVolumeClaim for `/data` | `persistence.enabled` and no `persistence.existingClaim` |
+| Secret | Inline `secrets.*` values are set and `secrets.existingSecret` is empty |
+| Ingress | `ingress.enabled` |
+| NetworkPolicy for the app | `networkPolicy.enabled` |
+| CronJob, backup script ConfigMap, backups claim, deny-all NetworkPolicy | `backup.enabled` |
+| ServiceMonitor | `serviceMonitor.enabled` |
+| `helm test` Pod | `helm test` |
+
+The UI Service publishes only the UI port. Metrics stay on a ClusterIP Service named `<fullname>-metrics` so a NodePort or LoadBalancer does not publish port 8080. The process always listens on 8080 for metrics. `env.uiPort` must not be 8080.
+
+## Install
+
+Create the namespace and a Secret before installing. `APP_ENCRYPTION_KEY` is the standard base64 encoding of 32 random bytes. `ADMIN_SETUP_TOKEN`, when set, must be at least 32 characters.
+
+```bash
+kubectl create namespace skylight-wifi
+kubectl -n skylight-wifi create secret generic skylight-wifi-automation \
+  --from-literal=APP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr -d '\n')" \
+  --from-literal=ADMIN_SETUP_TOKEN="$(openssl rand -base64 32 | tr -d '\n')"
+```
+
+Replace `console.pem` with the gateway console certificate. The default `config.unifi_tls_ca` is a placeholder the app rejects, so the process exits until you replace it.
+
+```bash
+helm install skylight-wifi-automation charts/skylight-wifi-automation \
+  --namespace skylight-wifi \
+  --set secrets.existingSecret=skylight-wifi-automation \
+  --set-file config.unifi_tls_ca=console.pem
+```
+
+`files/unifi.local.example.crt` is a generated certificate for `unifi.local`. It is only for a smoke test. The first start imports it into the database, and the UI then owns that config.
+
+Prefer `secrets.existingSecret`. If you set `secrets.encryptionKey` or the other inline fields, Helm stores those values in the release Secret as well as the application Secret.
+
+With `CONFIG_SOURCE=db` (the default) the ConfigMap is imported **once**, when the database has no config. Later changes to `config` in this chart do not update the database. Change settings in the UI. A pod annotation checksum still rolls the pod when the rendered ConfigMap changes.
+
+`config.dry_run` defaults to `true`. The process logs the action it would take and does not pause or resume objects.
+
+## First start
+
+1. Port-forward or open the Ingress: `http://<host>:8000/setup`.
+2. Create the admin. The password must be at least 12 characters.
+3. Remove `ADMIN_SETUP_TOKEN` from the Secret. If the Secret is external, bump `secrets.rolloutToken` so the pod restarts.
+4. Sign in. `/setup` returns 404 once an admin exists.
+
+Plain HTTP, including a NodePort without TLS, needs `env.cookieSecure=false`. Behind HTTPS, leave it true and set `env.trustedProxies` to the proxy addresses. The app rejects `*`, `0.0.0.0/0`, and `::/0`.
+
+Liveness, readiness, and startup probes call `GET /healthz`. That handler does not contact Skylight or UniFi.
+
+```bash
+helm test skylight-wifi-automation --namespace skylight-wifi
+```
+
+## Backup
+
+`backup.enabled` adds a CronJob. The default schedule is `15 3 * * *` (03:15). Set `backup.timeZone` (for example `Etc/UTC`) on Kubernetes 1.27 or newer. Older clusters omit the field and use the controller's timezone.
+
+The job runs `files/backup.py` from the same image. The script copies `app.db` with the sqlite3 backup API, runs `PRAGMA integrity_check` on the copy, and prints:
+
+```text
+backup ok file=... bytes=... kept=...
+```
+
+It keeps `backup.retention` files (default 7). The data volume is mounted read-write so SQLite can use the WAL shared-memory file. The script does not run `INSERT`, `UPDATE`, or `DELETE` against the source. `backup.pinToAppNode` places the job on the app's node, which a ReadWriteOnce volume needs. The volume plugin must allow two pods on that node to mount the claim. A deny-all NetworkPolicy selects only the backup pods.
+
+On a StorageClass with `WaitForFirstConsumer`, the backups claim stays Pending until the first backup pod exists. `helm upgrade --wait` waits for that claim. Wait on the Deployment, or start one backup Job, instead of waiting on the whole release.
+
+`backup.successfulJobsHistoryLimit` and `backup.failedJobsHistoryLimit` are Kubernetes Job history. They are not the number of backup files.
+
+To restore, scale the Deployment to 0, copy one `app-*.db` over `$DATA_DIR/app.db`, delete `app.db-wal` and `app.db-shm`, and scale back to 1. See the repository README.
+
+## NetworkPolicy
+
+Off by default. When enabled, ingress to the UI port is limited to `networkPolicy.ui`, `networkPolicy.probeCidrs`, and (by default) the helm test pod. Ingress to port 8080 is limited to `networkPolicy.metrics`. Egress allows all destinations so the process can reach DNS, Skylight, and the gateway. Set `networkPolicy.egress.allowAll` to `false` and supply `networkPolicy.egress.rules` to narrow it.
+
+For a NodePort whose policy matches client CIDRs, set `service.externalTrafficPolicy` to `Local`. The default `Cluster` policy replaces the client address with the node address.
+
+Some CNIs apply the policy to kubelet probes. If the pod never becomes Ready, add the node CIDR to `networkPolicy.probeCidrs`.
+
+## Examples
+
+| File | What it shows |
+| --- | --- |
+| [examples/minimal.yaml](examples/minimal.yaml) | Existing Secret, otherwise the defaults |
+| [examples/nodeport-with-backup.yaml](examples/nodeport-with-backup.yaml) | NodePort, plain HTTP, nightly backup, NetworkPolicy. Addresses are RFC 5737 documentation ranges |
+| [examples/ingress.yaml](examples/ingress.yaml) | Ingress and TLS for `wifi.example.com` |
+
+`ci/all-features-values.yaml` renders every optional resource for schema checks. The strings in it are not keys. Do not install it.
+
+## Security context
+
+The pod runs as uid 10001, which is the image user, with `runAsNonRoot`, a read-only root filesystem, all capabilities dropped, and `seccompProfile` `RuntimeDefault`. `fsGroup` 10001 lets that user write the data volume. `/tmp` is an emptyDir because the image sets `HOME=/tmp`. The ServiceAccount token is not mounted. The app does not call the Kubernetes API.
+
+There is no CPU limit. Argon2 password hashing can spike, and a limit stalls sign-in. Memory defaults to a 128Mi request and a 384Mi limit.
+
+{{ template "chart.valuesSection" . }}

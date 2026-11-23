@@ -1,0 +1,435 @@
+# Default values for skylight-wifi-automation.
+#
+# The Deployment is always one replica and uses strategy Recreate. SQLite under
+# DATA_DIR has a single writer; a second pod, including during a rolling
+# update, can corrupt app.db. That is not configurable.
+#
+# CONFIG_SOURCE=db imports the rendered ConfigMap once, when the database has
+# no config. After that the web UI is the source of truth. Editing this file
+# and upgrading does not change settings already stored in the database.
+#
+# The process runs as uid 10001 (the image USER) with a read-only root
+# filesystem. /tmp is an emptyDir. The database, sessions, and daily latch
+# live on the data volume. Metrics are hardcoded to port 8080. Probes use
+# GET /healthz on the UI port, which does not call Skylight or UniFi.
+
+# -- Override the chart name used in resource names and labels.
+nameOverride: ""
+# -- Override the full name used in resource names. Truncated to 63 characters.
+fullnameOverride: ""
+
+# @section -- Image
+image:
+  # -- Container repository. Published by .github/workflows/image.yaml.
+  repository: ghcr.io/dmcanally/skylight-wifi-automation
+  # -- Image tag. Empty uses the chart appVersion.
+  tag: ""
+  # -- Optional image digest (sha256:...). When set, the tag is ignored.
+  digest: ""
+  # -- Pull policy. IfNotPresent matches an immutable appVersion tag.
+  pullPolicy: IfNotPresent
+
+# -- Secrets used to pull a private image. Each item is {name: pull-secret}.
+imagePullSecrets: []
+
+# @section -- Service account
+serviceAccount:
+  # -- Create a ServiceAccount. The app does not call the Kubernetes API.
+  create: true
+  # -- ServiceAccount name. Empty uses the release fullname.
+  name: ""
+  # -- Annotations on the ServiceAccount.
+  annotations: {}
+  # -- Mount a token into the pod. Leave false.
+  automountServiceAccountToken: false
+
+# @section -- Pod placement and security
+# -- Pod securityContext. uid/gid 10001 matches the image user. fsGroup makes the data volume writable by that user.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container securityContext. The image is built to run with a read-only root filesystem.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container resources. Memory matches a small single-process SQLite workload. No CPU limit, so Argon2 password hashing is not throttled mid-login.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 384Mi
+
+# -- Node selector for the app pod. The backup CronJob uses the same selector.
+nodeSelector: {}
+# -- Tolerations for the app pod. The backup CronJob uses the same tolerations.
+tolerations: []
+# -- Affinity for the app pod. Backup affinity is separate; see backup.affinity.
+affinity: {}
+
+# -- Extra annotations on the app pod, merged after the config and secret checksums.
+podAnnotations: {}
+# -- Extra labels on the app pod. Do not override app.kubernetes.io/component.
+podLabels: {}
+# -- Annotations applied to every chart resource.
+commonAnnotations: {}
+# -- Labels applied to every chart resource.
+commonLabels: {}
+
+# -- hostAliases for the pod. Use this when unifi_url's host is unifi.local and the cluster DNS does not resolve it.
+# @default -- []
+hostAliases: []
+# - ip: 192.0.2.20
+#   hostnames:
+#     - unifi.local
+
+# -- How many old ReplicaSets to keep.
+revisionHistoryLimit: 3
+# -- Seconds to wait for the process to exit on SIGTERM.
+terminationGracePeriodSeconds: 30
+# -- Inject Service environment variables. The app does not read them.
+enableServiceLinks: false
+
+# -- emptyDir mounted at /tmp. The image sets HOME=/tmp. The daily latch is not stored here.
+tmp:
+  # -- Size limit for the /tmp emptyDir.
+  sizeLimit: 64Mi
+
+# @section -- Process environment
+env:
+  # -- CONFIG_SOURCE. db imports the ConfigMap once, then the UI owns config. file keeps the file as the only source and the UI will not save settings.
+  configSource: db
+  # -- DATA_DIR. Must be the mount path of the data volume. The database is $DATA_DIR/app.db.
+  dataDir: /data
+  # -- CONFIG_PATH. The ConfigMap is mounted at this file's directory.
+  configPath: /config/config.yaml
+  # -- UI_PORT. Must not be 8080; the metrics server always binds 8080.
+  uiPort: 8000
+  # -- COOKIE_SECURE. Set false for plain HTTP (a NodePort or port-forward without TLS). Leave true behind HTTPS.
+  cookieSecure: true
+  # -- TRUSTED_PROXIES. Comma-separated proxy IPs or CIDRs allowed to set X-Forwarded-For. Empty ignores the header. The process rejects *, 0.0.0.0/0, and ::/0.
+  trustedProxies: ""
+  # -- LATCH_PATH. Empty uses <dataDir>/latch.json so today's unlock survives a restart.
+  latchPath: ""
+  # -- LOG_LEVEL passed to Python logging.
+  logLevel: INFO
+  # -- ARGON2_CONCURRENCY. How many password hashes may run at once.
+  argon2Concurrency: 2
+
+# -- Extra environment variables. Appended after the chart's own variables. Use this for APP_ENCRYPTION_KEY_NEW only when you are not using the secret fields below.
+extraEnv: []
+# -- Extra pod volumes.
+extraVolumes: []
+# -- Extra volume mounts on the app container.
+extraVolumeMounts: []
+
+# @section -- Probes
+# Both probes call GET /healthz on the UI port. That handler returns
+# {"status":"ok"} and does not contact Skylight or UniFi. The startup probe
+# covers a slow first login before liveness begins.
+probes:
+  liveness:
+    # -- Enable the liveness probe.
+    enabled: true
+    # -- initialDelaySeconds. Ignored until the startup probe succeeds when that probe is enabled.
+    initialDelaySeconds: 10
+    # -- periodSeconds.
+    periodSeconds: 20
+    # -- timeoutSeconds.
+    timeoutSeconds: 5
+    # -- failureThreshold.
+    failureThreshold: 3
+    # -- successThreshold. Kubernetes requires 1 for liveness.
+    successThreshold: 1
+  readiness:
+    # -- Enable the readiness probe.
+    enabled: true
+    # -- initialDelaySeconds.
+    initialDelaySeconds: 5
+    # -- periodSeconds.
+    periodSeconds: 10
+    # -- timeoutSeconds.
+    timeoutSeconds: 3
+    # -- failureThreshold.
+    failureThreshold: 3
+    # -- successThreshold.
+    successThreshold: 1
+  startup:
+    # -- Enable the startup probe.
+    enabled: true
+    # -- initialDelaySeconds. Zero omits the field.
+    initialDelaySeconds: 0
+    # -- periodSeconds.
+    periodSeconds: 5
+    # -- timeoutSeconds.
+    timeoutSeconds: 3
+    # -- failureThreshold. 30 * 5s gives the first Skylight login about 150s.
+    failureThreshold: 30
+    # -- successThreshold.
+    successThreshold: 1
+
+# @section -- Service
+# The UI Service carries only port 8000 (or service.port). Metrics stay on a
+# separate ClusterIP Service so a NodePort or LoadBalancer does not publish
+# port 8080. Prometheus should scrape the metrics Service.
+service:
+  # -- Service type for the UI. ClusterIP, NodePort, or LoadBalancer.
+  type: ClusterIP
+  # -- Service port for the UI. The container still listens on env.uiPort.
+  port: 8000
+  # -- Fixed nodePort for the UI. Used when type is NodePort or LoadBalancer. Empty lets Kubernetes assign one.
+  nodePort: null
+  # -- externalTrafficPolicy. Set Local on a NodePort when a NetworkPolicy matches client CIDRs; Cluster SNATs the source to the node.
+  externalTrafficPolicy: ""
+  # -- Annotations on the UI Service.
+  annotations: {}
+  # -- Extra labels on the UI Service.
+  labels: {}
+
+metrics:
+  # -- Annotations on the ClusterIP metrics Service. Add prometheus.io scrape annotations here if you are not using a ServiceMonitor.
+  annotations: {}
+  # -- Extra labels on the metrics Service.
+  labels: {}
+
+# @section -- Ingress
+ingress:
+  # -- Create an Ingress for the UI Service. Terminate TLS at the ingress. Leave COOKIE_SECURE true, and set env.trustedProxies to the ingress controller addresses.
+  enabled: false
+  # -- IngressClass name. Empty omits ingressClassName.
+  className: ""
+  # -- Annotations on the Ingress.
+  annotations: {}
+  # -- Hosts and paths. The sample host is example.com placeholder data.
+  hosts:
+    - host: wifi.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS entries. Each item is {secretName, hosts}.
+  tls: []
+  # - secretName: wifi-example-com-tls
+  #   hosts:
+  #     - wifi.example.com
+
+# @section -- Persistence
+# The data volume holds app.db (mode 0600), its WAL files, sessions, and the
+# latch. Losing it does not remove environment-variable secrets. It does
+# remove admin accounts, database secrets, overrides, and the audit log.
+persistence:
+  # -- Create or attach a data volume. false uses an emptyDir and the database is lost when the pod is rescheduled. Backup requires true.
+  enabled: true
+  # -- Use this existing PersistentVolumeClaim instead of creating one.
+  existingClaim: ""
+  # -- StorageClass name. Empty uses the cluster default. "-" sets storageClassName to "" so no dynamic provisioner runs.
+  storageClass: ""
+  # -- Access mode. ReadWriteOnce is correct for SQLite. The backup pod mounts the same claim, so the volume plugin must allow a second mount on the app's node.
+  accessMode: ReadWriteOnce
+  # -- Requested size for a chart-created claim.
+  size: 1Gi
+  # -- Annotations on a chart-created data claim.
+  annotations: {}
+
+# @section -- Application config
+# Rendered into a ConfigMap and mounted at env.configPath. With
+# CONFIG_SOURCE=db this file is imported only when the database has no config.
+# Replace unifi_tls_ca before the first start. The placeholder text is rejected
+# and the process exits. files/unifi.local.example.crt is a generated
+# unifi.local certificate for a smoke test, not a gateway certificate.
+config:
+  # -- IANA timezone used for the latch day and cutoffs.
+  timezone: America/Chicago
+  # -- Seconds between polls. The app accepts 30 through 3600.
+  poll_seconds: 60
+  # -- true makes zero UniFi object writes. The latch file is still written. Leave true until a single object has been checked by hand.
+  dry_run: true
+  # -- Count overdue Skylight tasks.
+  include_late: true
+  # -- Count routines.
+  include_routines: true
+  # -- false keeps a day with no chores blocked.
+  empty_day_unlocks: false
+  # -- Integration API base URL. https, and the host must match the console certificate.
+  unifi_url: https://unifi.local/proxy/network/integration/v1
+  # -- Optional site UUID, internalReference, or name. Empty omits the key and the app discovers a one-site gateway.
+  unifi_site: ""
+  # -- PEM console certificate. This placeholder is rejected on purpose.
+  unifi_tls_ca: |
+    -----BEGIN CERTIFICATE-----
+    <paste your console certificate>
+    -----END CERTIFICATE-----
+  # -- Children. Names, Skylight profile labels, and Object Manager object names must each be unique. cutoff is local HH:MM.
+  children:
+    - name: child-a
+      skylight_profile: Child A
+      object_name: "No Internet - child-a"
+      cutoff: "20:30"
+      manual_unblock: false
+
+# @section -- Secrets
+# Prefer existingSecret. Values set here are stored in the Helm release
+# Secret as well as the application Secret. APP_ENCRYPTION_KEY is the
+# standard base64 encoding of 32 random bytes. ADMIN_SETUP_TOKEN must be at
+# least 32 characters; unset it after the first admin exists. SKYLIGHT_EMAIL,
+# SKYLIGHT_PASSWORD, and UNIFI_API_KEY can live in the environment until you
+# save them in the UI. With an encryption key set, missing credentials are
+# logged and polls stay fail-closed.
+secrets:
+  # -- Name of a Secret created outside this chart. When set, the inline values below are ignored.
+  existingSecret: ""
+  # -- Optional string added to the pod template as an annotation. Bump it to roll the pod after an external Secret changes.
+  rolloutToken: ""
+  # -- Inline APP_ENCRYPTION_KEY. Leave empty when using existingSecret.
+  encryptionKey: ""
+  # -- Inline APP_ENCRYPTION_KEY_NEW, used only while running skylight-wifi rotate-key.
+  encryptionKeyNew: ""
+  # -- Inline ADMIN_SETUP_TOKEN.
+  setupToken: ""
+  # -- Inline SKYLIGHT_EMAIL.
+  skylightEmail: ""
+  # -- Inline SKYLIGHT_PASSWORD.
+  skylightPassword: ""
+  # -- Inline UNIFI_API_KEY. Sent by the app only as the X-API-KEY header.
+  unifiApiKey: ""
+  # -- Key names inside the Secret, whether the chart creates it or you do.
+  keys:
+    # -- Key for the encryption key.
+    encryption: APP_ENCRYPTION_KEY
+    # -- Key for the replacement encryption key.
+    encryptionNew: APP_ENCRYPTION_KEY_NEW
+    # -- Key for the setup token.
+    setupToken: ADMIN_SETUP_TOKEN
+    # -- Key for the Skylight email.
+    skylightEmail: SKYLIGHT_EMAIL
+    # -- Key for the Skylight password.
+    skylightPassword: SKYLIGHT_PASSWORD
+    # -- Key for the UniFi API key.
+    unifiApiKey: UNIFI_API_KEY
+
+# @section -- Backup
+# Optional CronJob. It runs the sqlite3 backup API against the live database,
+# checks the copy with PRAGMA integrity_check, and writes
+# /backups/app-<UTC timestamp>.db. Success logs:
+#   backup ok file=... bytes=... kept=...
+# The data volume is mounted read-write so SQLite can use the WAL -shm file.
+# The script does not modify application tables. A deny-all NetworkPolicy is
+# created for the backup pod. Schedule 15 3 * * * is 03:15. Set timeZone on
+# Kubernetes 1.27 or newer; otherwise the controller's timezone is used.
+backup:
+  # -- Create the CronJob, its script ConfigMap, a backups volume, and a deny-all NetworkPolicy.
+  enabled: false
+  # -- Cron schedule.
+  schedule: "15 3 * * *"
+  # -- CronJob timeZone. Empty omits the field. Etc/UTC requires Kubernetes 1.27+.
+  timeZone: ""
+  # -- How many backup files to keep on the backups volume.
+  retention: 7
+  # -- Require the backup pod to run on the same node as the app so a ReadWriteOnce data volume can be mounted twice.
+  pinToAppNode: true
+  # -- CronJob suspend flag.
+  suspend: false
+  # -- concurrencyPolicy. Forbid avoids two backups at once.
+  concurrencyPolicy: Forbid
+  # -- successfulJobsHistoryLimit. This is Kubernetes job history, not backup file retention.
+  successfulJobsHistoryLimit: 3
+  # -- failedJobsHistoryLimit.
+  failedJobsHistoryLimit: 1
+  # -- startingDeadlineSeconds. Empty omits the field.
+  startingDeadlineSeconds: 600
+  # -- Job backoffLimit.
+  backoffLimit: 2
+  # -- ttlSecondsAfterFinished for the Job. Empty omits the field.
+  ttlSecondsAfterFinished: 86400
+  # -- Affinity for the backup pod. When set, pinToAppNode is not applied.
+  affinity: {}
+  # -- Backup container resources.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  persistence:
+    # -- Use this existing PersistentVolumeClaim for backups.
+    existingClaim: ""
+    # -- StorageClass for the backups claim. Empty uses the cluster default. "-" sets an empty storageClassName.
+    storageClass: ""
+    # -- Access mode for the backups claim.
+    accessMode: ReadWriteOnce
+    # -- Size of a chart-created backups claim.
+    size: 1Gi
+    # -- Annotations on a chart-created backups claim.
+    annotations: {}
+
+# @section -- NetworkPolicy
+# Off by default. When enabled, the policy selects only the app pod.
+# Ingress to the UI port is limited to the lists below. Ingress to the
+# metrics port is a separate list. Some CNIs also apply the policy to kubelet
+# probes; if readiness never goes green, add the node CIDR to probeCidrs.
+# Egress defaults to allow all so the process can reach DNS, Skylight, and
+# the gateway. Set egress.allowAll false and supply egress.rules to restrict it.
+networkPolicy:
+  # -- Create a NetworkPolicy for the app pod.
+  enabled: false
+  # -- Allow the helm test pod (component=test) to open the UI port.
+  allowHelmTest: true
+  # -- Extra CIDRs allowed to open the UI port. Use this for kubelet or node CIDRs when probes are blocked.
+  probeCidrs: []
+  ui:
+    # -- CIDRs allowed to open the UI port. Use documentation or your own LAN ranges, for example 192.0.2.0/24.
+    cidrs: []
+    # -- namespaceSelectors allowed to open the UI port.
+    namespaceSelectors: []
+    # -- podSelectors allowed to open the UI port. Each item is a LabelSelector.
+    podSelectors: []
+  metrics:
+    # -- CIDRs allowed to open port 8080.
+    cidrs: []
+    # -- namespaceSelectors allowed to open port 8080. A monitoring namespace label is the usual choice.
+    namespaceSelectors: []
+    # -- podSelectors allowed to open port 8080.
+    podSelectors: []
+  egress:
+    # -- Allow all egress. false with an empty rules list denies all egress.
+    allowAll: true
+    # -- Egress rules used when allowAll is false. Raw NetworkPolicy egress entries.
+    rules: []
+
+# @section -- ServiceMonitor
+serviceMonitor:
+  # -- Create a monitoring.coreos.com ServiceMonitor for the metrics Service. Requires the Prometheus Operator CRDs.
+  enabled: false
+  # -- Scrape interval.
+  interval: 30s
+  # -- Scrape timeout.
+  scrapeTimeout: 10s
+  # -- Labels on the ServiceMonitor. Set this so your Prometheus selects it.
+  labels: {}
+  # -- Annotations on the ServiceMonitor.
+  annotations: {}
+  # -- Namespace for the ServiceMonitor. Empty uses the release namespace.
+  namespace: ""
+  # -- Scrape scheme. The metrics port is plain HTTP.
+  scheme: http
+  # -- Metrics path.
+  path: /metrics
+  # -- Optional tlsConfig. Empty omits the field.
+  tlsConfig: {}
+  # -- relabelings.
+  relabelings: []
+  # -- metricRelabelings.
+  metricRelabelings: []
+  # -- honorLabels.
+  honorLabels: false

@@ -1,0 +1,77 @@
+Skylight Wi-Fi Automation is installed in namespace {{ .Release.Namespace }}.
+
+The UI Service is {{ include "skylight-wifi-automation.fullname" . }} port {{ .Values.service.port }}.
+Metrics stay on the ClusterIP Service {{ printf "%s-metrics" (include "skylight-wifi-automation.fullname" .) | trunc 63 | trimSuffix "-" }} port 8080.
+GET /healthz does not contact Skylight or UniFi. Prometheus metrics are /metrics.
+
+{{- if eq .Values.service.type "ClusterIP" }}
+
+Port-forward the UI:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "skylight-wifi-automation.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+Then open http://127.0.0.1:{{ .Values.service.port }}/
+{{- else if eq .Values.service.type "NodePort" }}
+
+The UI Service is a NodePort{{ if .Values.service.nodePort }} on port {{ .Values.service.nodePort }}{{ end }}.
+COOKIE_SECURE is {{ .Values.env.cookieSecure }}. Plain HTTP needs cookieSecure false.
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+Watch for the load balancer address:
+
+  kubectl -n {{ .Release.Namespace }} get svc {{ include "skylight-wifi-automation.fullname" . }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  - {{ .host }}
+{{- end }}
+Set env.trustedProxies to the ingress controller addresses. Do not use * or 0.0.0.0/0.
+{{- end }}
+
+Replicas are fixed at 1 and the strategy is Recreate. SQLite allows one writer.
+
+CONFIG_SOURCE={{ .Values.env.configSource }}.
+The ConfigMap {{ include "skylight-wifi-automation.configMapName" . }} is imported only when the database has no config.
+After that, change settings in the UI. A later helm upgrade does not overwrite the database.
+dry_run is {{ .Values.config.dry_run }}. While true, the process does not pause or resume UniFi objects.
+
+Replace config.unifi_tls_ca before the first start. The placeholder certificate is rejected and the process exits.
+files/unifi.local.example.crt is a generated unifi.local certificate for a smoke test, not a gateway certificate.
+
+{{- if .Values.secrets.existingSecret }}
+
+Secrets are read from {{ .Values.secrets.existingSecret }}.
+APP_ENCRYPTION_KEY is required. ADMIN_SETUP_TOKEN, SKYLIGHT_EMAIL, SKYLIGHT_PASSWORD, and UNIFI_API_KEY are optional keys.
+{{- else if include "skylight-wifi-automation.createsSecret" . }}
+
+WARNING: this release created Secret {{ include "skylight-wifi-automation.secretName" . }} from Helm values.
+Those values are also stored in the Helm release Secret. Prefer secrets.existingSecret.
+{{- else }}
+
+No Secret is configured. Create one with APP_ENCRYPTION_KEY (base64 of 32 random bytes) and set secrets.existingSecret.
+Without that key, startup exits when SKYLIGHT_EMAIL, SKYLIGHT_PASSWORD, and UNIFI_API_KEY are also unset.
+{{- end }}
+
+First run, when ADMIN_SETUP_TOKEN is at least 32 characters and no admin exists:
+  1. Open /setup and create an admin. The password must be at least 12 characters.
+  2. Remove ADMIN_SETUP_TOKEN and roll the pod (bump secrets.rolloutToken if the Secret is external).
+  3. Sign in. /setup returns 404 once an admin exists.
+
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence is disabled. The database is on an emptyDir and is lost when the pod moves.
+{{- end }}
+{{- if .Values.backup.enabled }}
+
+Backups run on schedule {{ .Values.backup.schedule }}{{ if .Values.backup.timeZone }} ({{ .Values.backup.timeZone }}){{ end }} and keep {{ .Values.backup.retention }} files.
+The backup pod has a deny-all NetworkPolicy. It must be able to mount the data volume on the app's node.
+{{- else }}
+
+Backups are disabled. Set backup.enabled to schedule a sqlite3 backup.
+{{- end }}
+
+Run the chart test after the pod is Ready:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

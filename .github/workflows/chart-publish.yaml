@@ -1,0 +1,27 @@
+name: Publish chart
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - "chart-v*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Push OCI chart
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm package charts/skylight-wifi-automation --destination /tmp/charts
+          helm push /tmp/charts/skylight-wifi-automation-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

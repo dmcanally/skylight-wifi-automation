@@ -1,0 +1,41 @@
+# Render fixture only. The strings below are not keys. Do not install this file.
+secrets:
+  encryptionKey: replace-with-base64-of-32-random-bytes
+  setupToken: replace-with-a-random-token-at-least-32-chars
+service:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: wifi.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: wifi-example-com-tls
+      hosts:
+        - wifi.example.com
+backup:
+  enabled: true
+  timeZone: Etc/UTC
+networkPolicy:
+  enabled: true
+  probeCidrs:
+    - 198.51.100.0/24
+  ui:
+    cidrs:
+      - 192.0.2.0/24
+  metrics:
+    namespaceSelectors:
+      - matchLabels:
+          kubernetes.io/metadata.name: monitoring
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus
+hostAliases:
+  - ip: 192.0.2.20
+    hostnames:
+      - unifi.local

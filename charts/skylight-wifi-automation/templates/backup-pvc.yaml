@@ -1,0 +1,35 @@
+{{- if and .Values.backup.enabled (not .Values.persistence.enabled) }}
+{{- fail "backup.enabled requires persistence.enabled so the CronJob can read the database. An emptyDir is not visible to another pod." }}
+{{- end }}
+{{- if and .Values.backup.enabled (not .Values.backup.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "skylight-wifi-automation.backupClaimName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  {{- if or .Values.backup.persistence.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.backup.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.backup.persistence.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size | quote }}
+  {{- if .Values.backup.persistence.storageClass }}
+  {{- if eq .Values.backup.persistence.storageClass "-" }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.backup.persistence.storageClass | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}

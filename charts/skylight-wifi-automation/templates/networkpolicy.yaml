@@ -1,0 +1,47 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "skylight-wifi-automation.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skylight-wifi-automation.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- $ui := include "skylight-wifi-automation.uiPeers" . | trim }}
+    {{- if $ui }}
+    - from:
+        {{- $ui | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.env.uiPort }}
+    {{- end }}
+    {{- $metrics := include "skylight-wifi-automation.metricPeers" . | trim }}
+    {{- if $metrics }}
+    - from:
+        {{- $metrics | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+  {{- if .Values.networkPolicy.egress.allowAll }}
+  egress:
+    - {}
+  {{- else if .Values.networkPolicy.egress.rules }}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}
+  {{- else }}
+  egress: []
+  {{- end }}
+{{- end }}
