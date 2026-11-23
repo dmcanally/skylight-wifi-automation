@@ -1,0 +1,21 @@
+# Ingress with TLS terminated at the ingress controller.
+# wifi.example.com and 192.0.2.10 are placeholders.
+secrets:
+  existingSecret: skylight-wifi-automation
+env:
+  cookieSecure: true
+  # Address of the ingress controller. The app rejects * and 0.0.0.0/0.
+  trustedProxies: 192.0.2.10
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: wifi.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: wifi-example-com-tls
+      hosts:
+        - wifi.example.com

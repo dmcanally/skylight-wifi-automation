@@ -1,0 +1,30 @@
+# NodePort UI, nightly backup, and a NetworkPolicy.
+# Addresses below are RFC 5737 documentation ranges, not a real network.
+secrets:
+  existingSecret: skylight-wifi-automation
+env:
+  # The NodePort is plain HTTP. The session cookie must not be Secure.
+  cookieSecure: false
+service:
+  type: NodePort
+  nodePort: 30080
+  # Local keeps the client source IP so the UI CIDR below matches.
+  externalTrafficPolicy: Local
+backup:
+  enabled: true
+  schedule: "15 3 * * *"
+  # Kubernetes 1.27 or newer. 03:15 UTC.
+  timeZone: Etc/UTC
+  retention: 7
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+networkPolicy:
+  enabled: true
+  allowHelmTest: true
+  ui:
+    cidrs:
+      - 192.0.2.0/24
+  metrics:
+    namespaceSelectors:
+      - matchLabels:
+          kubernetes.io/metadata.name: monitoring

@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-healthz" (include "skylight-wifi-automation.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  # Service env vars are how this pod finds the UI without cluster DNS.
+  enableServiceLinks: true
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: healthz
+      image: {{ include "skylight-wifi-automation.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - python
+        - -I
+        - -c
+        - |
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          host = os.environ["{{ include "skylight-wifi-automation.fullname" . | upper | replace "-" "_" }}_SERVICE_HOST"]
+          port = os.environ["{{ include "skylight-wifi-automation.fullname" . | upper | replace "-" "_" }}_SERVICE_PORT"]
+          url = f"http://{host}:{port}/healthz"
+          deadline = time.time() + 60
+          last = "no attempt"
+          while time.time() < deadline:
+              try:
+                  with urllib.request.urlopen(url, timeout=5) as resp:
+                      payload = json.load(resp)
+                  if payload.get("status") != "ok":
+                      raise SystemExit("healthz status was not ok")
+                  print("healthz ok")
+                  break
+              except urllib.error.URLError as exc:
+                  last = exc
+                  time.sleep(2)
+          else:
+              raise SystemExit(f"healthz failed: {last}")
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 20m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 32Mi

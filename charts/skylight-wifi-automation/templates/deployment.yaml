@@ -1,0 +1,219 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skylight-wifi-automation.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # SQLite has one writer. A second replica, or a rolling update that runs
+  # two pods, can corrupt app.db. Recreate stops the old pod first.
+  replicas: 1
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "skylight-wifi-automation.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app
+  template:
+    metadata:
+      labels:
+        {{- include "skylight-wifi-automation.labels" . | nindent 8 }}
+        app.kubernetes.io/component: app
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "skylight-wifi-automation.podAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "skylight-wifi-automation.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: {{ .Values.enableServiceLinks }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: {{ include "skylight-wifi-automation.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.env.uiPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: CONFIG_PATH
+              value: {{ .Values.env.configPath | quote }}
+            - name: CONFIG_SOURCE
+              value: {{ .Values.env.configSource | quote }}
+            - name: DATA_DIR
+              value: {{ .Values.env.dataDir | quote }}
+            - name: UI_PORT
+              value: {{ .Values.env.uiPort | quote }}
+            - name: COOKIE_SECURE
+              value: {{ ternary "true" "false" .Values.env.cookieSecure | quote }}
+            - name: LATCH_PATH
+              value: {{ include "skylight-wifi-automation.latchPath" . | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.env.logLevel | quote }}
+            - name: ARGON2_CONCURRENCY
+              value: {{ .Values.env.argon2Concurrency | quote }}
+            {{- if .Values.env.trustedProxies }}
+            - name: TRUSTED_PROXIES
+              value: {{ .Values.env.trustedProxies | quote }}
+            {{- end }}
+            {{- if .Values.secrets.existingSecret }}
+            - name: APP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.encryption | quote }}
+            - name: APP_ENCRYPTION_KEY_NEW
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.encryptionNew | quote }}
+                  optional: true
+            - name: ADMIN_SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.setupToken | quote }}
+                  optional: true
+            - name: SKYLIGHT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.skylightEmail | quote }}
+                  optional: true
+            - name: SKYLIGHT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.skylightPassword | quote }}
+                  optional: true
+            - name: UNIFI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | quote }}
+                  key: {{ .Values.secrets.keys.unifiApiKey | quote }}
+                  optional: true
+            {{- else }}
+            {{- if .Values.secrets.encryptionKey }}
+            - name: APP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.encryption | quote }}
+            {{- end }}
+            {{- if .Values.secrets.encryptionKeyNew }}
+            - name: APP_ENCRYPTION_KEY_NEW
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.encryptionNew | quote }}
+            {{- end }}
+            {{- if .Values.secrets.setupToken }}
+            - name: ADMIN_SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.setupToken | quote }}
+            {{- end }}
+            {{- if .Values.secrets.skylightEmail }}
+            - name: SKYLIGHT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.skylightEmail | quote }}
+            {{- end }}
+            {{- if .Values.secrets.skylightPassword }}
+            - name: SKYLIGHT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.skylightPassword | quote }}
+            {{- end }}
+            {{- if .Values.secrets.unifiApiKey }}
+            - name: UNIFI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skylight-wifi-automation.secretName" . | quote }}
+                  key: {{ .Values.secrets.keys.unifiApiKey | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            {{- include "skylight-wifi-automation.probe" .Values.probes.startup | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            {{- include "skylight-wifi-automation.probe" .Values.probes.liveness | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "skylight-wifi-automation.probe" .Values.probes.readiness | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.env.dataDir | quote }}
+            - name: config
+              mountPath: {{ include "skylight-wifi-automation.configDir" . | quote }}
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "skylight-wifi-automation.dataClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "skylight-wifi-automation.configMapName" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

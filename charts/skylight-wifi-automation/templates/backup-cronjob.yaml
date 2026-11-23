@@ -1,0 +1,112 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-backup" (include "skylight-wifi-automation.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skylight-wifi-automation.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  {{- if .Values.backup.timeZone }}
+  timeZone: {{ .Values.backup.timeZone | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ .Values.backup.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  {{- if .Values.backup.startingDeadlineSeconds }}
+  startingDeadlineSeconds: {{ .Values.backup.startingDeadlineSeconds }}
+  {{- end }}
+  suspend: {{ .Values.backup.suspend }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backup.backoffLimit }}
+      {{- if .Values.backup.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ .Values.backup.ttlSecondsAfterFinished }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "skylight-wifi-automation.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "skylight-wifi-automation.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.backup.affinity }}
+          affinity:
+            {{- toYaml .Values.backup.affinity | nindent 12 }}
+          {{- else if .Values.backup.pinToAppNode }}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      {{- include "skylight-wifi-automation.selectorLabels" . | nindent 22 }}
+                      app.kubernetes.io/component: app
+                  topologyKey: kubernetes.io/hostname
+          {{- end }}
+          containers:
+            - name: backup
+              image: {{ include "skylight-wifi-automation.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - python
+                - -I
+                - /scripts/backup.py
+              env:
+                - name: DATA_DIR
+                  value: {{ .Values.env.dataDir | quote }}
+                - name: BACKUP_DIR
+                  value: /backups
+                - name: BACKUP_KEEP
+                  value: {{ .Values.backup.retention | quote }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - name: data
+                  mountPath: {{ .Values.env.dataDir | quote }}
+                - name: backups
+                  mountPath: /backups
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ include "skylight-wifi-automation.dataClaimName" . }}
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ include "skylight-wifi-automation.backupClaimName" . }}
+            - name: scripts
+              configMap:
+                name: {{ printf "%s-backup-script" (include "skylight-wifi-automation.fullname" .) | trunc 63 | trimSuffix "-" }}
+                defaultMode: 0444
+            - name: tmp
+              emptyDir:
+                sizeLimit: {{ .Values.tmp.sizeLimit }}
+{{- end }}

@@ -1,0 +1,4 @@
+# Smallest overlay. Defaults stay in place: one replica, dry_run true,
+# ClusterIP, and the example child. Create the Secret first. See the chart README.
+secrets:
+  existingSecret: skylight-wifi-automation
