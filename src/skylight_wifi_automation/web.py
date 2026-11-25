@@ -4,9 +4,10 @@ import ipaddress
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
+from secrets import token_urlsafe
 from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -74,6 +75,17 @@ class AppContext:
     tester: Callable[..., Awaitable[str]] | None
     read_only: bool
     trusted_proxies: str = ""
+    auth_disabled: bool = False
+    anonymous_csrf: str = field(default_factory=lambda: token_urlsafe(32))
+
+
+ANONYMOUS_USER = "anonymous"
+# Account pages have nothing to act on when sign-in is turned off.
+_ACCOUNT_PATHS = ("/login", "/setup", "/logout", "/password", "/sessions", "/users")
+
+
+def _account_path(path: str) -> bool:
+    return any(path == item or path.startswith(item + "/") for item in _ACCOUNT_PATHS)
 
 
 @dataclass
@@ -342,6 +354,7 @@ def render(request: Request, name: str, status_code: int = 200, **extra: object)
         "user": user,
         "csrf": csrf or "",
         "read_only": request.app.state.context.read_only,
+        "auth_disabled": request.app.state.context.auth_disabled,
         "saved": request.query_params.get("saved") == "1",
         "errors": extra.pop("errors", []),
         "notice": extra.pop("notice", ""),
@@ -565,6 +578,20 @@ class SecurityGate:
             await send(message)  # type: ignore[operator]
 
         request = Request(scope, receive)  # type: ignore[arg-type]
+        gate: AppContext = request.app.state.context
+        if gate.auth_disabled:
+            path = request.url.path
+            if _account_path(path):
+                if request.method in {"GET", "HEAD"} and path in {"/login", "/setup"}:
+                    response = RedirectResponse("/", status_code=303)
+                else:
+                    response = PlainTextResponse("Not found.", status_code=404)
+                await response(scope, receive, send_with_headers)
+                return
+            if not is_public(path, request.method):
+                scope["skylight_user"] = Visitor(ANONYMOUS_USER, gate.anonymous_csrf, "", "admin")
+            await self.app(scope, receive, send_with_headers)  # type: ignore[operator]
+            return
         if not is_public(request.url.path, request.method):
             try:
                 user = await load_user(request)

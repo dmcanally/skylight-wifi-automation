@@ -190,7 +190,7 @@ docker run --rm \
   -e COOKIE_SECURE=false \
   -e APP_ENCRYPTION_KEY \
   -e ADMIN_SETUP_TOKEN \
-  ghcr.io/dmcanally/skylight-wifi-automation:0.4.0
+  ghcr.io/dmcanally/skylight-wifi-automation:0.4.1
 ```
 
 Open `http://127.0.0.1:8000/setup`. A one-shot poll appends `--once` to that
@@ -212,6 +212,7 @@ environment variables:
 | `UI_PORT` | Web UI port. Default `8000` |
 | `APP_ENCRYPTION_KEY` | Base64 of 32 bytes. Required to store secrets in the database |
 | `ADMIN_SETUP_TOKEN` | At least 32 characters. Required to create the first admin. Unset or shorter disables setup |
+| `AUTH_DISABLED` | Default `false`. `true` turns off sign-in: every visitor is an admin, and the login, setup, password, session and user pages are gone. Same-origin and CSRF checks on forms stay. Only use it on a network you trust |
 | `COOKIE_SECURE` | `false` uses a plain HTTP session cookie. Default is Secure |
 | `TRUSTED_PROXIES` | Comma-separated proxy IPs or CIDRs allowed to set `X-Forwarded-For`. Empty by default |
 | `ARGON2_CONCURRENCY` | How many password hashes may run at once. Default `2` |
