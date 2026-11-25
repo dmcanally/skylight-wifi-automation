@@ -18,25 +18,34 @@
       {% if user %}
       <nav class="nav" aria-label="Primary">
         <a href="/">Dashboard</a>
+        {% if not auth_disabled %}
         <a href="/sessions">Sessions</a>
+        {% endif %}
         {% if user.role == "admin" %}
         <a href="/children">Schedule</a>
         <a href="/settings">Settings</a>
         <a href="/unifi">UniFi</a>
         <a href="/secrets">Secrets</a>
         <a href="/audit">Audit</a>
+        {% if not auth_disabled %}
         <a href="/users">Users</a>
         {% endif %}
+        {% endif %}
+        {% if not auth_disabled %}
         <a href="/password">Password</a>
         <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf }}">
           <button type="submit" class="btn btn-quiet">Log out</button>
         </form>
+        {% endif %}
       </nav>
       {% endif %}
     </div>
   </header>
   <main id="content" class="wrap">
+    {% if auth_disabled %}
+    <p class="banner warn" role="status">Sign-in is turned off (AUTH_DISABLED). Anyone who can reach this page can change the schedule.</p>
+    {% endif %}
     {% if read_only %}
     <p class="banner" role="status">Schedule configuration is read-only because CONFIG_SOURCE=file. Secrets and the password can still be changed.</p>
     {% endif %}

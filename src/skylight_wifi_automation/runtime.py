@@ -53,6 +53,15 @@ def cookie_secure() -> bool:
     return os.environ.get("COOKIE_SECURE", "true").strip().lower() != "false"
 
 
+def auth_disabled() -> bool:
+    raw = os.environ.get("AUTH_DISABLED", "").strip().lower()
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    raise RuntimeError("AUTH_DISABLED must be true or false")
+
+
 def setup_token() -> str | None:
     raw = os.environ.get("ADMIN_SETUP_TOKEN")
     if raw is None or raw.strip() == "":

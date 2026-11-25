@@ -18,6 +18,7 @@ from .metrics import Metrics
 from .redact import REDACTOR
 from .runtime import (
     Runtime,
+    auth_disabled,
     close_clients,
     config_source,
     cookie_secure,
@@ -142,6 +143,11 @@ async def _serve(args: argparse.Namespace) -> None:
             store.close()
         return
     hasher = PasswordHasher()
+    no_auth = auth_disabled()
+    if no_auth:
+        logging.getLogger(__name__).warning(
+            "AUTH_DISABLED is set: the web UI has no sign-in and anyone who can reach it is an admin"
+        )
     app = create_app(
         AppContext(
             store=store,
@@ -155,6 +161,7 @@ async def _serve(args: argparse.Namespace) -> None:
             tester=None,
             read_only=runtime.source == "file",
             trusted_proxies=trusted_proxies(),
+            auth_disabled=no_auth,
         )
     )
     proxies = trusted_proxies()
